@@ -14,13 +14,14 @@ const Search = () => {
   const [keyword, setKeyword] = useState(searchParams.get('q') || '');
   const [activeTab, setActiveTab] = useState('search'); // 'search' or 'filter'
   const [selectedCategory, setSelectedCategory] = useState('movies');
+  const SEARCH_PAGE_SIZE = 10; // 每页最大 10 条
 
   useEffect(() => {
     // 如果URL中有搜索关键词，则执行搜索
     const query = searchParams.get('q');
     if (query) {
       setKeyword(query);
-      dispatch(searchVideoList({ keyword: query, page: 1, size: 20 })); // API文档使用 size 而不是 page_size
+      dispatch(searchVideoList({ keyword: query, page: 1, size: SEARCH_PAGE_SIZE }));
     }
     
     // 清理搜索结果
@@ -32,7 +33,7 @@ const Search = () => {
   const handleSearch = (e) => {
     e.preventDefault();
     if (keyword.trim()) {
-      dispatch(searchVideoList({ keyword, page: 1, size: 20 })); // API文档使用 size 而不是 page_size
+      dispatch(searchVideoList({ keyword, page: 1, size: SEARCH_PAGE_SIZE }));
     }
   };
 

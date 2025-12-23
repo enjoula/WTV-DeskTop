@@ -36,6 +36,42 @@ const apiClient = axios.create({
   timeout: 10000,
 });
 
+// 统一处理未授权逻辑（HTTP 401 或业务 code=401）
+const handleUnauthorized = () => {
+  if (typeof window === 'undefined') return;
+
+  // 防抖处理，避免多次弹窗
+  if (window.__handling401) return;
+  window.__handling401 = true;
+
+  const currentPath = window.location.pathname || '';
+  const token = localStorage.getItem('token');
+  const isLoggedIn = !!token;
+
+  // 清除本地 token（无论是否登录，统一清理）
+  localStorage.removeItem('token');
+
+  // 登录页不重复跳转
+  if (currentPath.startsWith('/login')) {
+    window.__handling401 = false;
+    return;
+  }
+
+  if (isLoggedIn) {
+    // 已登录：提示账号在其他设备登录且超过3台，需要重新登录
+    window.alert('您的账号已在其他设备登录且超过3台，请重新登录。');
+    window.location.href = '/login';
+  } else {
+    // 未登录：提示登录并跳转
+    const shouldRedirect = window.confirm('您还未登录，请先登录。');
+    if (shouldRedirect) {
+      window.location.href = '/login';
+    } else {
+      window.__handling401 = false;
+    }
+  }
+};
+
 // 请求拦截器
 apiClient.interceptors.request.use(
   (config) => {
@@ -65,6 +101,12 @@ apiClient.interceptors.request.use(
 // 响应拦截器
 apiClient.interceptors.response.use(
   (response) => {
+    // 业务层返回 code=401 时也提示登录
+    if (response?.data?.code === 401) {
+      handleUnauthorized();
+      return Promise.reject(response?.data || { code: 401, message: '未登录或已过期' });
+    }
+
     // 调试信息：记录响应详情
     console.log('API 响应:', {
       status: response.status,
@@ -85,20 +127,7 @@ apiClient.interceptors.response.use(
     });
     
     if (error.response?.status === 401) {
-      // token 过期或无效，清除本地存储的 token
-      localStorage.removeItem('token');
-
-      // 提示用户登录状态失效，确认后跳转登录页面
-      if (typeof window !== 'undefined') {
-        const currentPath = window.location.pathname || '';
-        // 避免在登录页重复弹窗和跳转
-        if (!currentPath.startsWith('/login')) {
-          const shouldRedirect = window.confirm('未登录或者身份验证已过期，请重新登录。');
-          if (shouldRedirect) {
-            window.location.href = '/login';
-          }
-        }
-      }
+      handleUnauthorized();
     }
     return Promise.reject(error);
   }

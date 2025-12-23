@@ -1,7 +1,7 @@
 {
   "files": {
-    "main.css": "./static/css/main.6405b9a3.css",
-    "main.js": "./static/js/main.94b28246.js",
+    "main.css": "./static/css/main.72415c5b.css",
+    "main.js": "./static/js/main.1967eea8.js",
     "reactPlayerHls.js": "./static/js/reactPlayerHls.2505be31.chunk.js",
     "reactPlayerDash.js": "./static/js/reactPlayerDash.49ec0fe9.chunk.js",
     "reactPlayerMux.js": "./static/js/reactPlayerMux.434d64b6.chunk.js",
@@ -16,8 +16,8 @@
     "static/js/416.f4caaef3.chunk.js": "./static/js/416.f4caaef3.chunk.js",
     "static/js/70.1b5c324b.chunk.js": "./static/js/70.1b5c324b.chunk.js",
     "index.html": "./index.html",
-    "main.6405b9a3.css.map": "./static/css/main.6405b9a3.css.map",
-    "main.94b28246.js.map": "./static/js/main.94b28246.js.map",
+    "main.72415c5b.css.map": "./static/css/main.72415c5b.css.map",
+    "main.1967eea8.js.map": "./static/js/main.1967eea8.js.map",
     "reactPlayerHls.2505be31.chunk.js.map": "./static/js/reactPlayerHls.2505be31.chunk.js.map",
     "reactPlayerDash.49ec0fe9.chunk.js.map": "./static/js/reactPlayerDash.49ec0fe9.chunk.js.map",
     "reactPlayerMux.434d64b6.chunk.js.map": "./static/js/reactPlayerMux.434d64b6.chunk.js.map",
@@ -33,7 +33,7 @@
     "70.1b5c324b.chunk.js.map": "./static/js/70.1b5c324b.chunk.js.map"
   },
   "entrypoints": [
-    "static/css/main.6405b9a3.css",
-    "static/js/main.94b28246.js"
+    "static/css/main.72415c5b.css",
+    "static/js/main.1967eea8.js"
   ]
 }

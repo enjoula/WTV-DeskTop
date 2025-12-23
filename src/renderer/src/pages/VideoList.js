@@ -18,17 +18,16 @@ const VideoList = () => {
   const { category } = useParams();
   const dispatch = useDispatch();
   const [page, setPage] = useState(1);
-  const [showFilters, setShowFilters] = useState(false);
+  const [activeFilters, setActiveFilters] = useState({});
   const { movies, tvShows, anime, varietyShows, documentaries, filterResults } = useSelector(state => state.video);
   const loadingRef = useRef(false); // 防止重复加载
   const observerTarget = useRef(null); // Intersection Observer 的目标元素
   
   // 根据类别选择对应的状态
   const getCategoryData = () => {
-    // 只有在显示筛选面板且筛选结果不为空时，才使用筛选结果
-    // 注意：筛选结果应该通过FilterPanel的handleApplyFilters来触发
-    // 这里仅用于显示筛选后的结果，不应该影响正常的分类列表显示
-    if (showFilters && filterResults.data.length > 0 && filterResults.loading === false) {
+    // 如果有筛选条件且筛选结果不为空，使用筛选结果
+    const hasActiveFilters = Object.keys(activeFilters).some(key => activeFilters[key] && activeFilters[key] !== '');
+    if (hasActiveFilters && filterResults.data.length > 0 && filterResults.loading === false) {
       return filterResults;
     }
     
@@ -120,14 +119,37 @@ const VideoList = () => {
     loadingRef.current = true;
 
     // 如果当前显示的是筛选结果，也支持加载更多
-    if (showFilters && filterResults.data.length > 0) {
+    const hasActiveFilters = Object.keys(activeFilters).some(key => activeFilters[key] && activeFilters[key] !== '');
+    if (hasActiveFilters && filterResults.data.length > 0) {
       const nextPage = (filterResults.pagination?.page || 1) + 1;
       console.log('加载筛选结果的下一页:', nextPage);
-      const filterParams = {
-        type: category,
-        page: nextPage,
-        page_size: 10
+      
+      // 构建筛选参数
+      const filterMapping = {
+        'regions': 'country',
+        'years': 'year',
+        'genres': 'tags'
       };
+      const typeMapping = {
+        'movies': 'movie',
+        'tv': 'tv',
+        'anime': 'anime',
+        'tvshow': 'tvshow',
+        'documentary': 'doc'
+      };
+      
+      const filterParams = Object.entries(activeFilters).reduce((acc, [key, value]) => {
+        if (value && value !== '') {
+          const apiKey = filterMapping[key] || key;
+          acc[apiKey] = value;
+        }
+        return acc;
+      }, {
+        type: typeMapping[category] || category,
+        page: nextPage,
+        size: 10
+      });
+      
       dispatch(filterVideoList(filterParams)).finally(() => {
         loadingRef.current = false;
       });
@@ -162,7 +184,7 @@ const VideoList = () => {
     fetchPromise.finally(() => {
       loadingRef.current = false;
     });
-  }, [category, page, categoryData, showFilters, filterResults, dispatch]);
+  }, [category, page, categoryData, activeFilters, filterResults, dispatch]);
 
   // 懒加载：使用 Intersection Observer 监听滚动到底部
   useEffect(() => {
@@ -199,72 +221,88 @@ const VideoList = () => {
     };
   }, [categoryData.pagination, categoryData.loading, categoryData.data.length, loadMore]);
   
+  // 处理筛选条件改变，自动应用筛选
   const handleFilterChange = (newFilters) => {
-    // 当筛选条件改变时的处理逻辑
-    console.log('筛选条件改变:', newFilters);
-  };
-  
-  const handleApplyFilters = () => {
-    // 应用筛选条件
-    const filterParams = {
-      type: category,
-      page: 1,
-      size: 10 // API文档使用 size 而不是 page_size
+    setActiveFilters(newFilters);
+    setPage(1); // 重置到第一页
+    
+    // 构建筛选参数
+    const filterMapping = {
+      'regions': 'country',
+      'years': 'year',
+      'genres': 'tags'
+    };
+    const typeMapping = {
+      'movies': 'movie',
+      'tv': 'tv',
+      'anime': 'anime',
+      'tvshow': 'tvshow',
+      'documentary': 'doc'
     };
     
-    dispatch(filterVideoList(filterParams));
-  };
-  
-  const handleResetFilters = () => {
-    setShowFilters(false);
-    setPage(1); // 重置页码
-    // 重新加载原始数据
-    const params = { page: 1, size: 10 }; // API文档使用 size 而不是 page_size
-    switch (category) {
-      case 'movies':
-        dispatch(fetchMovies(params));
-        break;
-      case 'tv':
-        dispatch(fetchTVShows(params));
-        break;
-      case 'anime':
-        dispatch(fetchAnime(params));
-        break;
-      case 'tvshow':
-        dispatch(fetchVarietyShows(params));
-        break;
-      case 'documentary':
-        dispatch(fetchDocumentaries(params));
-        break;
-      default:
-        dispatch(fetchMovies(params));
+    // 构建筛选参数，确保使用接口返回的原始值
+    const activeFilterParams = Object.entries(newFilters).reduce((acc, [key, value]) => {
+      if (value && value !== '') {
+        const apiKey = filterMapping[key] || key;
+        // value 是从接口返回的原始值拆分出来的，可以直接使用
+        // 例如：接口返回 "中国内地, 中国香港"，拆分后用户选择 "中国内地"
+        // 这里传递的 "中国内地" 就是接口返回的原始值的一部分
+        acc[apiKey] = value;
+        console.log(`筛选参数 ${apiKey}:`, value, '(使用接口返回的原始值)');
+      }
+      return acc;
+    }, {});
+    
+    // 如果有筛选条件，使用筛选接口；否则加载原始数据
+    if (Object.keys(activeFilterParams).length > 0) {
+      const filterParams = {
+        type: typeMapping[category] || category,
+        ...activeFilterParams,
+        page: 1,
+        size: 10
+      };
+      dispatch(filterVideoList(filterParams));
+    } else {
+      // 没有筛选条件，加载原始数据
+      const params = { page: 1, size: 10 };
+      switch (category) {
+        case 'movies':
+          dispatch(fetchMovies(params));
+          break;
+        case 'tv':
+          dispatch(fetchTVShows(params));
+          break;
+        case 'anime':
+          dispatch(fetchAnime(params));
+          break;
+        case 'tvshow':
+          dispatch(fetchVarietyShows(params));
+          break;
+        case 'documentary':
+          dispatch(fetchDocumentaries(params));
+          break;
+        default:
+          dispatch(fetchMovies(params));
+      }
     }
   };
+  
+  // 切换分类时重置筛选条件
+  useEffect(() => {
+    setActiveFilters({});
+  }, [category]);
   
   return (
     <div className="video-list-page">
       <div className="page-header">
-        <h1>{getCategoryName()}</h1>
-        <button 
-          className="filter-toggle"
-          onClick={() => setShowFilters(!showFilters)}
-        >
-          {showFilters ? '隐藏筛选' : '显示筛选'}
-        </button>
       </div>
       
-      {showFilters && (
-        <div className="filter-section">
-          <FilterPanel 
-            type={category} 
-            onFilterChange={handleFilterChange}
-          />
-          <div className="filter-actions">
-            <button onClick={handleApplyFilters}>应用筛选</button>
-            <button onClick={handleResetFilters}>重置筛选</button>
-          </div>
-        </div>
-      )}
+      <div className="filter-section">
+        <FilterPanel 
+          type={category} 
+          onFilterChange={handleFilterChange}
+        />
+      </div>
       
       {categoryData.error && <div className="error-message">{categoryData.error}</div>}
       

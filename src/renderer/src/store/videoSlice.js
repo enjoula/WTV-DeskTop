@@ -213,7 +213,8 @@ const videoSlice = createSlice({
       error: null,
     },
     allFilters: {
-      data: {},
+      data: {}, // 处理后的数据（用于显示）
+      rawData: {}, // 原始数据（用于API调用）
       loading: false,
       error: null,
     },
@@ -638,7 +639,8 @@ const videoSlice = createSlice({
         console.log('fetchAllFilters 响应数据:', action.payload);
         
         // 处理返回的数据，将逗号分隔的字符串拆分成数组
-        const processedData = {};
+        const processedData = {}; // 用于显示的数据（拆分后的数组）
+        const rawDataForApi = {}; // 用于API调用的原始数据
         
         // 类型映射：API 返回的类型 -> 应用内使用的类型
         const typeMapping = {
@@ -675,15 +677,20 @@ const videoSlice = createSlice({
           
           if (typeData) {
             processedData[appType] = {};
+            rawDataForApi[appType] = {}; // 保存原始数据
             
             // 处理 regions、years、genres
             ['regions', 'years', 'genres'].forEach(filterKey => {
               const value = typeData[filterKey];
               if (value) {
-                // 如果是字符串，按逗号分隔并去除空白
+                // 保存原始值（用于API调用）
+                rawDataForApi[appType][filterKey] = value;
+                
+                // 处理显示用的数据（拆分后的数组）
                 if (typeof value === 'string') {
+                  // 如果是字符串，按中英文逗号/顿号分隔并去除空白
                   processedData[appType][filterKey] = value
-                    .split(',')
+                    .split(/[,，、]/)
                     .map(item => item.trim())
                     .filter(item => item.length > 0);
                 } else if (Array.isArray(value)) {
@@ -694,17 +701,21 @@ const videoSlice = createSlice({
                 }
               } else {
                 processedData[appType][filterKey] = [];
+                rawDataForApi[appType][filterKey] = null;
               }
             });
             
             console.log(`处理后的 ${appType} 数据:`, processedData[appType]);
+            console.log(`原始 ${appType} 数据:`, rawDataForApi[appType]);
           } else {
             console.warn(`未找到类型 ${apiType} 的数据`);
           }
         });
         
         console.log('最终处理的数据:', processedData);
+        console.log('最终原始数据:', rawDataForApi);
         state.allFilters.data = processedData;
+        state.allFilters.rawData = rawDataForApi;
       })
       .addCase(fetchAllFilters.rejected, (state, action) => {
         state.allFilters.loading = false;

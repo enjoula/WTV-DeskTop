@@ -54,66 +54,9 @@ const FilterPanel = ({ type, onFilterChange, onApplyFilters }) => {
     
     setSelectedFilters(newFilters);
     
-    // 如果提供了回调函数，则调用它
+    // 自动应用筛选（调用回调函数）
     if (onFilterChange) {
       onFilterChange(newFilters);
-    }
-  };
- 
-  const handleApplyFilters = () => {
-    // 构建筛选参数，过滤掉空值
-    // 根据API文档，筛选参数映射：regions -> country, years -> year, genres -> tags
-    const filterMapping = {
-      'regions': 'country',  // 地区映射到country
-      'years': 'year',       // 年份映射到year
-      'genres': 'tags',      // 类型映射到tags
-      'country': 'country',  // 如果已经是正确字段名，保持不变
-      'year': 'year',
-      'tags': 'tags'
-    };
-    
-    // 类型映射：应用内类型 -> API 期望的类型
-    const typeMapping = {
-      'movies': 'movie',
-      'tv': 'tv',
-      'anime': 'anime',
-      'tvshow': 'tvshow',
-      'documentary': 'doc'
-    };
-    
-    const activeFilters = Object.entries(selectedFilters).reduce((acc, [key, value]) => {
-      if (value && value !== '') {
-        // 映射字段名到API参数名
-        const apiKey = filterMapping[key] || key;
-        acc[apiKey] = value;
-      }
-      return acc;
-    }, {});
-    
-    // 映射类型到 API 期望的类型
-    const apiType = typeMapping[type] || type;
-    
-    const filterParams = {
-      type: apiType, // 使用映射后的类型
-      ...activeFilters,
-      page: 1,
-      size: 20 // API文档使用 size 而不是 page_size
-    };
-    
-    // 如果提供了外部应用筛选的回调，使用它；否则使用内部dispatch
-    if (onApplyFilters) {
-      onApplyFilters(filterParams);
-    } else {
-      dispatch(filterVideoList(filterParams));
-    }
-  };
-
-  const handleResetFilters = () => {
-    setSelectedFilters({});
-    
-    // 如果提供了回调函数，则调用它
-    if (onFilterChange) {
-      onFilterChange({});
     }
   };
 
@@ -146,43 +89,93 @@ const FilterPanel = ({ type, onFilterChange, onApplyFilters }) => {
     return null;
   }
   
-  // 筛选条件的显示标签映射
+  // 筛选条件的显示标签映射和顺序
+  const filterOrder = ['genres', 'regions', 'years']; // 类型、地区、年份的顺序
   const filterLabels = {
+    'genres': '类型',
     'regions': '地区',
-    'years': '年份',
-    'genres': '类型'
+    'years': '年份'
+  };
+
+  // 处理标签点击
+  const handleTagClick = (filterType, value) => {
+    // 如果点击的是已选中的值，则取消选择（设为空）
+    const currentValue = selectedFilters[filterType] || '';
+    const newValue = currentValue === value ? '' : value;
+    handleFilterChange(filterType, newValue);
   };
 
   return (
     <div className="filter-panel">
-      <div className="filter-header">
-        <h3>筛选条件</h3>
-        <div className="filter-actions">
-          <button onClick={handleApplyFilters}>应用筛选</button>
-          <button onClick={handleResetFilters}>重置筛选</button>
-        </div>
-      </div>
-      
-      <div className="filter-options">
-        {Object.entries(filtersForType).map(([filterType, filterOptions]) => {
-          // filterOptions 应该是数组（已经处理过的）
-          const options = Array.isArray(filterOptions) ? filterOptions : [];
+      <div className="filter-rows">
+        {filterOrder.map((filterType) => {
+          // 只显示存在的筛选类型
+          if (!filtersForType[filterType]) return null;
+          
+          // 处理筛选选项，确保每个值都是独立的
+          let options = [];
+          const rawOptions = filtersForType[filterType];
+          
+          if (Array.isArray(rawOptions)) {
+            // 如果已经是数组，需要进一步处理每个元素
+            options = rawOptions.reduce((acc, item) => {
+              if (typeof item === 'string') {
+                // 如果元素是字符串，检查是否包含中英文逗号/顿号
+                const hasDelimiter = /[,，、]/.test(item);
+                if (hasDelimiter) {
+                  // 按中英文逗号/顿号分隔，去除空白，过滤空值
+                  const splitItems = item
+                    .split(/[,，、]/)
+                    .map(s => s.trim())
+                    .filter(s => s.length > 0);
+                  acc.push(...splitItems);
+                } else {
+                  // 单个值，直接添加
+                  const v = item.trim();
+                  if (v) acc.push(v);
+                }
+              } else {
+                // 非字符串类型，直接添加
+                acc.push(item);
+              }
+              return acc;
+            }, []);
+          } else if (typeof rawOptions === 'string') {
+            // 如果是字符串，按中英文逗号/顿号分隔
+            options = rawOptions
+              .split(/[,，、]/)
+              .map(s => s.trim())
+              .filter(s => s.length > 0);
+          }
+          
+          // 去重，保持顺序
+          const uniqueOptions = Array.from(new Set(options));
+          
           const label = filterLabels[filterType] || filterType;
+          const selectedValue = selectedFilters[filterType] || '';
           
           return (
-            <div key={filterType} className="filter-group">
-              <label>{label}:</label>
-              <select 
-                value={selectedFilters[filterType] || ''}
-                onChange={(e) => handleFilterChange(filterType, e.target.value)}
-              >
-                <option value="">全部</option>
-                {options.map((option, index) => (
-                  <option key={option || index} value={option}>
+            <div key={filterType} className="filter-row">
+              <div className="filter-row-label">{label}：</div>
+              <div className="filter-row-tags">
+                {/* 全部选项 */}
+                <button
+                  className={`filter-tag ${selectedValue === '' ? 'active' : ''}`}
+                  onClick={() => handleTagClick(filterType, '')}
+                >
+                  全部
+                </button>
+                {/* 其他选项 */}
+                {uniqueOptions.map((option, index) => (
+                  <button
+                    key={`${option}-${index}`}
+                    className={`filter-tag ${selectedValue === option ? 'active' : ''}`}
+                    onClick={() => handleTagClick(filterType, option)}
+                  >
                     {option}
-                  </option>
+                  </button>
                 ))}
-              </select>
+              </div>
             </div>
           );
         })}

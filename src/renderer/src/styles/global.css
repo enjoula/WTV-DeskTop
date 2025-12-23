@@ -797,6 +797,97 @@ button:disabled {
   gap: 10px;
 }
 
+.filter-actions button {
+  padding: 6px 16px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  background-color: white;
+  cursor: pointer;
+  font-size: 14px;
+  transition: all 0.2s;
+}
+
+.filter-actions button:hover {
+  background-color: #e9ecef;
+  border-color: #bbb;
+}
+
+.filter-actions button:first-child {
+  background-color: #007bff;
+  color: white;
+  border-color: #007bff;
+}
+
+.filter-actions button:first-child:hover {
+  background-color: #0056b3;
+  border-color: #0056b3;
+}
+
+/* 新的横向滚动标签式筛选器 */
+.filter-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.filter-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.filter-row-label {
+  /* 需求：筛选条件上的副标题（类型/地区/年份）不再显示 */
+  display: none;
+}
+
+.filter-row-tags {
+  /* 使用弹性布局：能一行展示时保持一行，放不下时自动换行为两行左右尽量平均 */
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex: 1;
+  align-items: flex-start;
+  /* 当换行时，让第二行开始位置避开“全部”按钮的左侧对齐 */
+  padding-left: 64px;
+}
+
+.filter-row-tags .filter-tag:first-child {
+  /* 抵消容器的左侧内边距，使首行“全部”仍左贴齐 */
+  margin-left: -64px;
+}
+.filter-tag {
+  padding: 6px 16px;
+  border: 1px solid #ddd;
+  border-radius: 20px;
+  background-color: white;
+  color: #666;
+  font-size: 14px;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: all 0.2s;
+  user-select: none;
+}
+
+.filter-tag:hover {
+  background-color: #f0f0f0;
+  border-color: #bbb;
+  color: #333;
+}
+
+.filter-tag.active {
+  background-color: #007bff;
+  color: white;
+  border-color: #007bff;
+}
+
+.filter-tag.active:hover {
+  background-color: #0056b3;
+  border-color: #0056b3;
+}
+
+/* 旧的下拉框样式（保留以防其他地方使用） */
 .filter-options {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
