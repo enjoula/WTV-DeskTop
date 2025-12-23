@@ -1,6 +1,7 @@
 {
   "name": "wtv",
   "version": "1.0.0",
+  "versionCode": 100,
   "description": "看视频 - WTV Desktop Application",
   "main": "src/main/main.js",
   "scripts": {

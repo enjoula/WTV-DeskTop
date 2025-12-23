@@ -36,3 +36,17 @@
     transform: rotate(360deg);
   }
 }
+
+/* 强制更新遮罩层 - 阻止用户访问应用内容 */
+.force-update-blocker {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(0, 0, 0, 0.8);
+  z-index: 9999;
+  pointer-events: auto;
+  /* 确保遮罩层始终可见，阻止所有交互 */
+  display: block;
+}

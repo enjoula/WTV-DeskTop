@@ -2,8 +2,15 @@
 import apiClient from './client';
 
 // 检查应用更新
+// platform: 'DeskTop-Mac' 或 'DeskTop-Win'
+// versionCode: 当前版本的 versionCode
 export const checkUpdate = (platform, versionCode) => {
-  return apiClient.get(`/app/check-update?platform=${platform}&version_code=${versionCode}`);
+  return apiClient.get('/app/check-update', {
+    params: {
+      platform: platform,
+      version_code: versionCode
+    }
+  });
 };
 
 // 获取公告列表

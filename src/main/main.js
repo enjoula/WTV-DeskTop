@@ -273,3 +273,55 @@ app.on('activate', () => {
 ipcMain.handle('get-app-version', () => {
   return app.getVersion();
 });
+
+// 获取 VersionCode（用于版本检测和升级）
+ipcMain.handle('get-version-code', () => {
+  const fs = require('fs');
+  const path = require('path');
+  
+  try {
+    // 尝试从应用路径读取 package.json
+    let packageJsonPath;
+    if (app.isPackaged) {
+      // 打包后的应用，package.json 在 app.asar 中
+      packageJsonPath = path.join(app.getAppPath(), 'package.json');
+    } else {
+      // 开发环境，使用相对路径
+      packageJsonPath = path.join(__dirname, '..', 'package.json');
+    }
+    
+    const packageJsonContent = fs.readFileSync(packageJsonPath, 'utf8');
+    const packageJson = JSON.parse(packageJsonContent);
+    return packageJson.versionCode || 1;
+  } catch (error) {
+    console.error('读取 VersionCode 失败:', error);
+    // 如果读取失败，尝试直接 require（在开发环境可能有效）
+    try {
+      const packageJson = require(path.join(__dirname, '..', 'package.json'));
+      return packageJson.versionCode || 1;
+    } catch (err) {
+      console.error('通过 require 读取 VersionCode 也失败:', err);
+      return 1; // 默认返回 1
+    }
+  }
+});
+
+// 获取平台信息（用于更新检查）
+ipcMain.handle('get-platform', () => {
+  const platform = process.platform;
+  // 根据平台返回对应的字符串
+  if (platform === 'darwin') {
+    return 'DeskTop-Mac';
+  } else if (platform === 'win32') {
+    return 'DeskTop-Win';
+  } else {
+    // Linux 或其他平台，默认返回 DeskTop-Mac（可以根据需要调整）
+    return 'DeskTop-Mac';
+  }
+});
+
+// 在外部浏览器中打开 URL
+ipcMain.handle('open-external', (event, url) => {
+  const { shell } = require('electron');
+  return shell.openExternal(url);
+});
