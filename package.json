@@ -1,0 +1,74 @@
+{
+  "name": "wtv",
+  "version": "1.0.0",
+  "description": "看视频 - WTV Desktop Application",
+  "main": "src/main/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "concurrently \"npm run react-dev\" \"npm run electron-dev\"",
+    "react-dev": "cd src/renderer && npm start",
+    "electron-dev": "nodemon --exec electron . --watch src/main",
+    "build": "electron-builder",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder",
+    "build:all": "node build-all.js",
+    "build:mac": "node build-all.js --mac-only",
+    "build:win": "node build-all.js --win-only",
+    "build:react": "cd src/renderer && npm run build"
+  },
+  "keywords": [
+    "video",
+    "vod",
+    "desktop",
+    "electron",
+    "react"
+  ],
+  "author": "WTV Team",
+  "license": "MIT",
+  "devDependencies": {
+    "concurrently": "^7.6.0",
+    "electron": "^21.2.0",
+    "electron-builder": "^23.6.0",
+    "nodemon": "^2.0.20"
+  },
+  "build": {
+    "appId": "com.wtv.app",
+    "productName": "WTV",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/main/**/*",
+      "src/renderer/build/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": ["x64", "arm64"]
+        }
+      ],
+      "category": "public.app-category.entertainment"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "sign": null,
+      "signingHashAlgorithms": null,
+      "certificateFile": null,
+      "certificatePassword": null
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  },
+  "dependencies": {
+    "electron-squirrel-startup": "^1.0.1"
+  }
+}

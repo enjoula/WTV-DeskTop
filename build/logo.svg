@@ -1,0 +1,98 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- 渐变背景 -->
+    <linearGradient id="bgGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#4a5568;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#1a202c;stop-opacity:1" />
+    </linearGradient>
+    
+    <!-- 发光效果 -->
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="3" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    
+    <!-- 内部发光 -->
+    <filter id="innerGlow">
+      <feGaussianBlur stdDeviation="2" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  
+  <!-- 背景 -->
+  <rect width="512" height="512" fill="url(#bgGradient)" rx="64"/>
+  
+  <!-- 左侧流动线条 -->
+  <g opacity="0.6">
+    <path d="M 80 400 Q 120 350, 180 300 Q 220 260, 240 240" 
+          stroke="white" stroke-width="2" fill="none" opacity="0.4" filter="url(#glow)"/>
+    <path d="M 100 420 Q 140 370, 200 320 Q 240 280, 260 260" 
+          stroke="white" stroke-width="2" fill="none" opacity="0.3" filter="url(#glow)"/>
+    <path d="M 120 440 Q 160 390, 220 340 Q 260 300, 280 280" 
+          stroke="white" stroke-width="2" fill="none" opacity="0.2" filter="url(#glow)"/>
+  </g>
+  
+  <!-- 中央图标组合 -->
+  <g transform="translate(256, 256)">
+    <!-- 播放按钮部分 -->
+    <g filter="url(#glow)">
+      <!-- 外框 -->
+      <rect x="-60" y="-40" width="80" height="80" rx="12" 
+            fill="none" stroke="white" stroke-width="3" opacity="0.8"/>
+      <!-- 内部三角形 -->
+      <path d="M -35 -15 L -35 15 L 5 0 Z" 
+            fill="white" opacity="0.9" filter="url(#innerGlow)"/>
+      <!-- 装饰线条 -->
+      <rect x="-58" y="-38" width="76" height="76" rx="10" 
+            fill="none" stroke="white" stroke-width="1.5" opacity="0.5"/>
+    </g>
+    
+    <!-- 连接线 -->
+    <line x1="20" y1="0" x2="40" y2="0" 
+          stroke="white" stroke-width="3" opacity="0.8" filter="url(#glow)"/>
+    
+    <!-- 声音发射器部分 -->
+    <g filter="url(#glow)">
+      <!-- 主体 -->
+      <rect x="40" y="-30" width="50" height="60" rx="8" 
+            fill="none" stroke="white" stroke-width="3" opacity="0.8"/>
+      <!-- 内部线条 -->
+      <line x1="50" y1="-20" x2="50" y2="20" 
+            stroke="white" stroke-width="2" opacity="0.6"/>
+      <line x1="60" y1="-15" x2="60" y2="15" 
+            stroke="white" stroke-width="2" opacity="0.6"/>
+      <line x1="70" y1="-10" x2="70" y2="10" 
+            stroke="white" stroke-width="2" opacity="0.6"/>
+      <!-- 右侧开口 -->
+      <path d="M 90 -30 Q 100 -30, 100 -20 Q 100 -10, 90 -10" 
+            fill="none" stroke="white" stroke-width="3" opacity="0.8"/>
+      <path d="M 90 10 Q 100 10, 100 20 Q 100 30, 90 30" 
+            fill="none" stroke="white" stroke-width="3" opacity="0.8"/>
+    </g>
+  </g>
+  
+  <!-- 右侧辐射线条 -->
+  <g opacity="0.7">
+    <line x1="300" y1="240" x2="450" y2="200" 
+          stroke="white" stroke-width="2" filter="url(#glow)"/>
+    <line x1="300" y1="256" x2="480" y2="256" 
+          stroke="white" stroke-width="2" filter="url(#glow)"/>
+    <line x1="300" y1="272" x2="450" y2="312" 
+          stroke="white" stroke-width="2" filter="url(#glow)"/>
+    <line x1="310" y1="230" x2="440" y2="190" 
+          stroke="white" stroke-width="1.5" opacity="0.6" filter="url(#glow)"/>
+    <line x1="310" y1="282" x2="440" y2="322" 
+          stroke="white" stroke-width="1.5" opacity="0.6" filter="url(#glow)"/>
+    <line x1="290" y1="250" x2="460" y2="240" 
+          stroke="white" stroke-width="1.5" opacity="0.5" filter="url(#glow)"/>
+    <line x1="290" y1="262" x2="460" y2="272" 
+          stroke="white" stroke-width="1.5" opacity="0.5" filter="url(#glow)"/>
+  </g>
+</svg>
+
