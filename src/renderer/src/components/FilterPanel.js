@@ -88,7 +88,7 @@ const FilterPanel = ({ type, onFilterChange, onApplyFilters }) => {
     console.log('FilterPanel - 没有筛选条件，不显示面板');
     return null;
   }
-  
+
   // 筛选条件的显示标签映射和顺序
   const filterOrder = ['genres', 'regions', 'years']; // 类型、地区、年份的顺序
   const filterLabels = {
@@ -153,31 +153,31 @@ const FilterPanel = ({ type, onFilterChange, onApplyFilters }) => {
           
           const label = filterLabels[filterType] || filterType;
           const selectedValue = selectedFilters[filterType] || '';
-          
-          return (
+    
+    return (
             <div key={filterType} className="filter-row">
               <div className="filter-row-label">{label}：</div>
               <div className="filter-row-tags">
                 {/* 全部选项 */}
-                <button
+          <button
                   className={`filter-tag ${selectedValue === '' ? 'active' : ''}`}
                   onClick={() => handleTagClick(filterType, '')}
-                >
-                  全部
-                </button>
+          >
+            全部
+          </button>
                 {/* 其他选项 */}
                 {uniqueOptions.map((option, index) => (
-                  <button
+              <button
                     key={`${option}-${index}`}
                     className={`filter-tag ${selectedValue === option ? 'active' : ''}`}
                     onClick={() => handleTagClick(filterType, option)}
-                  >
+              >
                     {option}
-                  </button>
+              </button>
                 ))}
-              </div>
-            </div>
-          );
+        </div>
+      </div>
+    );
         })}
       </div>
     </div>

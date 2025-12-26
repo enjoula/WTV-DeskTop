@@ -4,6 +4,7 @@ import { useSelector, useDispatch } from 'react-redux';
 import { useNavigate } from 'react-router-dom';
 import { fetchCurrentUser, logoutUser } from '../store/authSlice';
 import { updateProfile, updateAvatar } from '../api/user';
+import { showCenterTip } from '../utils/tips';
 
 const Profile = () => {
   const dispatch = useDispatch();
@@ -47,22 +48,112 @@ const Profile = () => {
 
   const handleSaveProfile = async () => {
     try {
-      await updateProfile(formData);
-      setIsEditing(false);
-      // 重新获取用户信息以更新状态
-      dispatch(fetchCurrentUser());
+      const response = await updateProfile(formData);
+      const resData = response?.data || {};
+      const code = resData.code;
+
+      if (code === 0) {
+        // 成功：显示提示并更新用户信息
+        showCenterTip('更新成功', 1500);
+        setIsEditing(false);
+        // 重新获取用户信息以更新状态
+        dispatch(fetchCurrentUser());
+      } else if (code === 401) {
+        // 401：账号在其他设备登录
+        showCenterTip('账号在其它设备登录，当前设备已下线', 1500);
+        // 延迟跳转，让用户看到提示
+        setTimeout(() => {
+          dispatch(logoutUser()).then(() => {
+            navigate('/login');
+          });
+        }, 1000);
+      } else if (code === 400) {
+        // 400：昵称和密码至少需要传入一个
+        showCenterTip('昵称和密码至少需要传入一个！', 1500);
+        // 页面不做任何变更
+      } else if (code === 500) {
+        // 500：更新用户信息失败
+        showCenterTip('更新用户信息失败，请稍后重试', 1500);
+      } else {
+        // 其他错误
+        const errorMsg = resData.message || '更新失败，请稍后重试';
+        showCenterTip(errorMsg, 1500);
+      }
     } catch (err) {
       console.error('更新资料失败:', err);
+      const resData = err?.response?.data || {};
+      const code = resData.code;
+
+      if (code === 401) {
+        showCenterTip('账号在其它设备登录，当前设备已下线', 1500);
+        setTimeout(() => {
+          dispatch(logoutUser()).then(() => {
+            navigate('/login');
+          });
+        }, 1000);
+      } else if (code === 400) {
+        showCenterTip('昵称和密码至少需要传入一个！', 1500);
+      } else if (code === 500) {
+        showCenterTip('更新用户信息失败，请稍后重试', 1500);
+      } else {
+        const errorMsg = resData.message || err?.message || '更新失败，请稍后重试';
+        showCenterTip(errorMsg, 1500);
+      }
     }
   };
 
   const handleChangeAvatar = async () => {
     try {
-      await updateAvatar();
-      // 重新获取用户信息以更新头像
-      dispatch(fetchCurrentUser());
+      const response = await updateAvatar();
+      const resData = response?.data || {};
+      const code = resData.code;
+
+      if (code === 0) {
+        // 成功：显示提示并更新头像
+        showCenterTip('更新成功', 1500);
+        // 重新获取用户信息以更新头像
+        dispatch(fetchCurrentUser());
+      } else if (code === 401) {
+        // 401：账号在其他设备登录
+        showCenterTip('账号在其它设备登录，当前设备已下线', 1500);
+        // 延迟跳转，让用户看到提示
+        setTimeout(() => {
+          dispatch(logoutUser()).then(() => {
+            navigate('/login');
+          });
+        }, 1000);
+      } else if (code === 400) {
+        // 400：操作太频繁
+        showCenterTip('操作太频繁，请在10分钟后尝试！', 1500);
+        // 页面不做任何变更
+      } else if (code === 500) {
+        // 500：头像生成失败
+        showCenterTip('头像生成失败，请稍后重试', 1500);
+      } else {
+        // 其他错误
+        const errorMsg = resData.message || '更新失败，请稍后重试';
+        showCenterTip(errorMsg, 1500);
+      }
     } catch (err) {
       console.error('更新头像失败:', err);
+      const resData = err?.response?.data || {};
+      const code = resData.code;
+
+      if (code === 401) {
+        showCenterTip('账号在其它设备登录，当前设备已下线', 1500);
+        setTimeout(() => {
+          dispatch(logoutUser()).then(() => {
+            navigate('/login');
+          });
+        }, 1000);
+      } else if (code === 400) {
+        showCenterTip('操作太频繁，请在10分钟后尝试！', 1500);
+      } else if (code === 500) {
+        showCenterTip('头像生成失败，请稍后重试', 1500);
+      } else {
+        const errorMsg = resData.message || err?.message || '更新失败，请稍后重试';
+        showCenterTip(errorMsg, 1500);
+      }
     }
   };
 

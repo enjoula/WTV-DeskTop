@@ -8,4 +8,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getVersionCode: () => ipcRenderer.invoke('get-version-code'),
   getPlatform: () => ipcRenderer.invoke('get-platform'),
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
+  openVideoWindow: (videoId, videoData) => ipcRenderer.invoke('open-video-window', videoId, videoData),
+  updateVideoWindowTitle: (title) => ipcRenderer.invoke('update-video-window-title', title),
+  getVideoData: () => ipcRenderer.invoke('get-video-data'),
 });

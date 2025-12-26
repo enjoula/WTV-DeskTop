@@ -2,7 +2,7 @@
 import apiClient from './client';
 
 // 检查应用更新
-// platform: 'DeskTop-Mac' 或 'DeskTop-Win'
+// platform: 'DeskTop-Mac-Intel' | 'DeskTop-Mac-ARM' | 'DeskTop-Win'
 // versionCode: 当前版本的 versionCode
 export const checkUpdate = (platform, versionCode) => {
   return apiClient.get('/app/check-update', {

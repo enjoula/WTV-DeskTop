@@ -19,8 +19,8 @@ const Login = () => {
 
   const handleSubmit = (e) => {
     e.preventDefault();
-    // 确保传递 device 参数
-    dispatch(loginUser({ username, password, device: 'PC-Electron' }));
+    // device参数会在API层自动检测，无需手动传递
+    dispatch(loginUser({ username, password }));
   };
 
   const handleRegisterRedirect = () => {

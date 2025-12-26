@@ -1,6 +1,6 @@
 // pages/VideoList.js
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams } from 'react-router-dom';
 import { useSelector, useDispatch } from 'react-redux';
 import { 
   fetchMovies, 
@@ -8,7 +8,9 @@ import {
   fetchAnime, 
   fetchVarietyShows, 
   fetchDocumentaries,
-  filterVideoList
+  filterVideoList,
+  setCurrentCategory,
+  clearCategoryData,
 } from '../store/videoSlice';
 import FilterPanel from '../components/FilterPanel';
 import VideoImage from '../components/VideoImage';
@@ -69,6 +71,12 @@ const VideoList = () => {
   };
   
   useEffect(() => {
+    // 记录当前分类，用于详情页顶部高亮
+    dispatch(setCurrentCategory(category));
+
+    // 切换分类时，先清空当前分类的数据，避免显示旧数据
+    dispatch(clearCategoryData(category));
+
     // 重置页码
     setPage(1);
     
@@ -255,34 +263,34 @@ const VideoList = () => {
     
     // 如果有筛选条件，使用筛选接口；否则加载原始数据
     if (Object.keys(activeFilterParams).length > 0) {
-      const filterParams = {
+    const filterParams = {
         type: typeMapping[category] || category,
         ...activeFilterParams,
-        page: 1,
+      page: 1,
         size: 10
-      };
-      dispatch(filterVideoList(filterParams));
+    };
+    dispatch(filterVideoList(filterParams));
     } else {
       // 没有筛选条件，加载原始数据
       const params = { page: 1, size: 10 };
-      switch (category) {
-        case 'movies':
-          dispatch(fetchMovies(params));
-          break;
-        case 'tv':
-          dispatch(fetchTVShows(params));
-          break;
-        case 'anime':
-          dispatch(fetchAnime(params));
-          break;
-        case 'tvshow':
-          dispatch(fetchVarietyShows(params));
-          break;
-        case 'documentary':
-          dispatch(fetchDocumentaries(params));
-          break;
-        default:
-          dispatch(fetchMovies(params));
+    switch (category) {
+      case 'movies':
+        dispatch(fetchMovies(params));
+        break;
+      case 'tv':
+        dispatch(fetchTVShows(params));
+        break;
+      case 'anime':
+        dispatch(fetchAnime(params));
+        break;
+      case 'tvshow':
+        dispatch(fetchVarietyShows(params));
+        break;
+      case 'documentary':
+        dispatch(fetchDocumentaries(params));
+        break;
+      default:
+        dispatch(fetchMovies(params));
       }
     }
   };
@@ -297,12 +305,12 @@ const VideoList = () => {
       <div className="page-header">
       </div>
       
-      <div className="filter-section">
-        <FilterPanel 
-          type={category} 
-          onFilterChange={handleFilterChange}
-        />
-      </div>
+        <div className="filter-section">
+          <FilterPanel 
+            type={category} 
+            onFilterChange={handleFilterChange}
+          />
+        </div>
       
       {categoryData.error && <div className="error-message">{categoryData.error}</div>}
       
@@ -315,10 +323,15 @@ const VideoList = () => {
       <div className="video-grid">
         {categoryData.data.map(video => (
           <div key={video.id} className="video-card">
-            <Link 
-              to={`/video/${video.id}`} 
-              state={{ video }} // 传递完整的视频信息
+            <div 
+              onClick={() => {
+                // 在新窗口打开视频详情页
+                if (window.electronAPI && window.electronAPI.openVideoWindow) {
+                  window.electronAPI.openVideoWindow(video.id, video);
+                }
+              }}
               className="video-card-link"
+              style={{ cursor: 'pointer' }}
             >
               <div className="video-card-image">
                 <VideoImage src={video.cover_url} alt={video.title} />
@@ -340,7 +353,7 @@ const VideoList = () => {
                 )}
                 </div>
               </div>
-            </Link>
+            </div>
           </div>
         ))}
       </div>

@@ -1,6 +1,6 @@
 // Routes.js
 import React from 'react';
-import { Routes, Route } from 'react-router-dom';
+import { Routes, Route, useLocation } from 'react-router-dom';
 import Header from './components/Header';
 import Footer from './components/Footer';
 import Home from './pages/Home';
@@ -11,14 +11,25 @@ import VideoDetail from './pages/VideoDetail';
 import Profile from './pages/Profile';
 import Search from './pages/Search';
 import Favorites from './pages/Favorites';
+import PlayHistory from './pages/PlayHistory';
 import TestPage from './pages/TestPage';
 import DiagnosticPage from './pages/DiagnosticPage';
 import PlaybackTestPage from './pages/PlaybackTestPage';
 
 function RoutesComponent() {
+  const location = useLocation();
+  // 检测是否是 newWindow 参数（新窗口打开的视频详情页）
+  // HashRouter 中，查询参数在 location.search 中，例如 "?newWindow=true"
+  // 或者从 window.location.hash 中解析
+  const isNewWindow = React.useMemo(() => {
+    const hash = window.location.hash || location.hash || '';
+    const urlParams = new URLSearchParams(hash.split('?')[1] || location.search);
+    return urlParams.get('newWindow') === 'true';
+  }, [location]);
+  
   return (
     <div className="app-container">
-      <Header />
+      {!isNewWindow && <Header />}
       <main className="main-content">
         <Routes>
           <Route path="/" element={<Home />} />
@@ -28,13 +39,14 @@ function RoutesComponent() {
           <Route path="/video/:id" element={<VideoDetail />} />
           <Route path="/profile" element={<Profile />} />
           <Route path="/search" element={<Search />} />
+          <Route path="/play-history" element={<PlayHistory />} />
           <Route path="/favorites" element={<Favorites />} />
           <Route path="/test" element={<TestPage />} />
           <Route path="/diagnostic" element={<DiagnosticPage />} />
           <Route path="/playback-test" element={<PlaybackTestPage />} />
         </Routes>
       </main>
-      <Footer />
+      {!isNewWindow && <Footer />}
     </div>
   );
 }

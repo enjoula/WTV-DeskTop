@@ -1,19 +1,18 @@
 // pages/Search.js
 import React, { useState, useEffect } from 'react';
-import { useSearchParams, Link } from 'react-router-dom';
+import { useSearchParams } from 'react-router-dom';
 import { useSelector, useDispatch } from 'react-redux';
-import { searchVideoList, clearSearchResults, filterVideoList } from '../store/videoSlice';
-import FilterPanel from '../components/FilterPanel';
+import { searchVideoList, clearSearchResults } from '../store/videoSlice';
 import VideoImage from '../components/VideoImage';
 import StarRating from '../components/StarRating';
+import './SearchPage.css';
 
 const Search = () => {
   const [searchParams] = useSearchParams();
   const dispatch = useDispatch();
-  const { searchResults, filterResults } = useSelector(state => state.video);
+  const { searchResults } = useSelector(state => state.video);
   const [keyword, setKeyword] = useState(searchParams.get('q') || '');
-  const [activeTab, setActiveTab] = useState('search'); // 'search' or 'filter'
-  const [selectedCategory, setSelectedCategory] = useState('movies');
+  const [hasSearched, setHasSearched] = useState(false); // 跟踪是否执行过搜索
   const SEARCH_PAGE_SIZE = 10; // 每页最大 10 条
 
   useEffect(() => {
@@ -21,7 +20,10 @@ const Search = () => {
     const query = searchParams.get('q');
     if (query) {
       setKeyword(query);
+      setHasSearched(true);
       dispatch(searchVideoList({ keyword: query, page: 1, size: SEARCH_PAGE_SIZE }));
+    } else {
+      setHasSearched(false);
     }
     
     // 清理搜索结果
@@ -33,52 +35,46 @@ const Search = () => {
   const handleSearch = (e) => {
     e.preventDefault();
     if (keyword.trim()) {
+      setHasSearched(true);
       dispatch(searchVideoList({ keyword, page: 1, size: SEARCH_PAGE_SIZE }));
     }
   };
 
   const handleClear = () => {
     setKeyword('');
+    setHasSearched(false);
     dispatch(clearSearchResults());
   };
 
-  const handleFilterChange = (filters) => {
-    // 当筛选条件改变时的处理逻辑
-    console.log('筛选条件改变:', filters);
-  };
-
-  const handleApplyFilters = () => {
-    // 应用筛选条件
-    const filterParams = {
-      type: selectedCategory,
-      page: 1,
-      size: 20 // API文档使用 size 而不是 page_size
-    };
-    
-    dispatch(filterVideoList(filterParams));
-  };
-
   const renderResults = () => {
-    const results = activeTab === 'search' ? searchResults : filterResults;
+    const results = searchResults.data || [];
     
-    if (results.loading) {
+    if (searchResults.loading) {
       return <div className="loading">加载中...</div>;
     }
     
-    if (results.error) {
-      return <div className="error-message">{results.error}</div>;
+    if (searchResults.error) {
+      return <div className="error-message">{searchResults.error}</div>;
     }
     
-    if (results.data.length > 0) {
+    if (results.length > 0) {
       return (
-        <div className="search-results">
-          <h2>{activeTab === 'search' ? '搜索结果' : '筛选结果'}</h2>
+        <div className="search-results-new">
           <div className="video-grid">
-            {results.data.map(video => (
-              <div key={video.id} className="video-card">
-                <Link to={`/video/${video.id}`} state={{ video }}>
+            {results.map(video => (
+              <div key={video.id || video.title} className="video-card">
+                <div 
+                  onClick={() => {
+                    // 在新窗口打开视频详情页
+                    if (window.electronAPI && window.electronAPI.openVideoWindow) {
+                      window.electronAPI.openVideoWindow(video.id, video);
+                    }
+                  }}
+                  className="video-card-link"
+                  style={{ cursor: 'pointer' }}
+                >
                   <div className="video-card-image">
-                    <VideoImage src={video.cover_url} alt={video.title} />
+                    <VideoImage src={video.cover_url || video.pic} alt={video.title || video.name} />
                     {(video.is_update === 1 || video.is_update === true || video.is_new === 1 || video.is_new === true) && <span className="new-badge">新</span>}
                     {(video.score || video.rating) && (
                       <div className="video-rating-overlay">
@@ -87,7 +83,7 @@ const Search = () => {
                     )}
                   </div>
                   <div className="video-card-content">
-                  <h3>{video.title}</h3>
+                    <h3 className="video-title">{video.title || video.name}</h3>
                     <div className="video-card-meta">
                       {video.release_date && (
                         <div className="video-release-date">
@@ -97,7 +93,7 @@ const Search = () => {
                       )}
                     </div>
                   </div>
-                </Link>
+                </div>
               </div>
             ))}
           </div>
@@ -105,18 +101,11 @@ const Search = () => {
       );
     }
     
-    if (activeTab === 'search' && keyword && !results.loading && results.data.length === 0) {
+    // 只有当真正执行过搜索且没有结果时，才显示"没有找到"的提示
+    if (hasSearched && keyword && !searchResults.loading && results.length === 0) {
       return (
         <div className="no-results">
           <p>没有找到与 "{keyword}" 相关的视频</p>
-        </div>
-      );
-    }
-    
-    if (activeTab === 'filter' && !results.loading && results.data.length === 0) {
-      return (
-        <div className="no-results">
-          <p>没有找到符合条件的视频</p>
         </div>
       );
     }
@@ -125,72 +114,22 @@ const Search = () => {
   };
 
   return (
-    <div className="search-page">
-      <div className="search-header">
-        <h1>搜索和筛选视频</h1>
-      </div>
-      
-      <div className="search-tabs">
-        <button 
-          className={activeTab === 'search' ? 'active' : ''}
-          onClick={() => setActiveTab('search')}
-        >
-          搜索
-        </button>
-        <button 
-          className={activeTab === 'filter' ? 'active' : ''}
-          onClick={() => setActiveTab('filter')}
-        >
-          筛选
-        </button>
-      </div>
-      
-      {activeTab === 'search' ? (
-        <div className="search-section">
-          <form onSubmit={handleSearch} className="search-form">
-            <div className="search-input-container">
-              <input
-                type="text"
-                value={keyword}
-                onChange={(e) => setKeyword(e.target.value)}
-                placeholder="请输入搜索关键词"
-                className="search-input"
-              />
-              <button type="submit" className="search-button">搜索</button>
-            </div>
-            {keyword && (
-              <button type="button" onClick={handleClear} className="clear-button">清空</button>
-            )}
-          </form>
-        </div>
-      ) : (
-        <div className="filter-section">
-          <div className="category-selector">
-            <label>选择分类:</label>
-            <select 
-              value={selectedCategory} 
-              onChange={(e) => setSelectedCategory(e.target.value)}
-              className="category-select"
-            >
-              <option value="movies">电影</option>
-              <option value="tv">电视剧</option>
-              <option value="anime">动漫</option>
-              <option value="tvshow">综艺</option>
-              <option value="documentary">纪录片</option>
-            </select>
-          </div>
-          
-          <FilterPanel 
-            type={selectedCategory} 
-            onFilterChange={handleFilterChange}
+    <div className="search-page-new">
+      {/* 顶部搜索栏 */}
+      <div className="search-bar">
+        <form onSubmit={handleSearch} className="search-bar-form">
+          <span className="search-icon">🔍</span>
+          <input
+            type="text"
+            value={keyword}
+            onChange={(e) => setKeyword(e.target.value)}
+            placeholder="搜索电影 / 演员名称"
           />
-          
-          <div className="filter-actions">
-            <button onClick={handleApplyFilters} className="apply-filter-button">应用筛选</button>
-          </div>
-        </div>
-      )}
-      
+          {keyword && <button type="button" className="mic-btn" onClick={handleClear}>✖</button>}
+        </form>
+      </div>
+
+      {/* 结果区域 */}
       {renderResults()}
     </div>
   );

@@ -245,6 +245,7 @@ const videoSlice = createSlice({
     },
     // 播放进度跟踪
     playbackProgress: {},
+    currentCategory: null, // 当前选中的分类（用于详情页保持顶部高亮）
   },
   reducers: {
     clearSearchResults: (state) => {
@@ -279,6 +280,37 @@ const videoSlice = createSlice({
         loading: false,
         error: null,
       };
+    },
+    // 清空指定分类的数据
+    clearCategoryData: (state, action) => {
+      const category = action.payload;
+      switch (category) {
+        case 'movies':
+          state.movies.data = [];
+          state.movies.pagination = {};
+          break;
+        case 'tv':
+          state.tvShows.data = [];
+          state.tvShows.pagination = {};
+          break;
+        case 'anime':
+          state.anime.data = [];
+          state.anime.pagination = {};
+          break;
+        case 'tvshow':
+          state.varietyShows.data = [];
+          state.varietyShows.pagination = {};
+          break;
+        case 'documentary':
+          state.documentaries.data = [];
+          state.documentaries.pagination = {};
+          break;
+        default:
+          break;
+      }
+    },
+    setCurrentCategory: (state, action) => {
+      state.currentCategory = action.payload || null;
     },
     selectQuality: (state, action) => {
       const quality = action.payload;
@@ -728,37 +760,39 @@ const videoSlice = createSlice({
       })
       .addCase(searchVideoList.fulfilled, (state, action) => {
         state.searchResults.loading = false;
-        // 添加空值检查
-        if (action.payload && action.payload.data && action.payload.data.list && Array.isArray(action.payload.data.list)) {
-          const currentPage = action.payload.data.page || 1;
-          const newList = action.payload.data.list;
+
+        // 兼容不同的数据结构
+        const payload = action.payload || {};
+        const data = payload.data || payload; // 有些接口直接返回 data，有些在 data.data
+        const list =
+          (data?.list && Array.isArray(data.list) && data.list) ||
+          (data?.data && Array.isArray(data.data) && data.data) || // 如果直接返回数组在 data.data
+          (Array.isArray(data) ? data : null);
+
+        if (list) {
+          const currentPage = data.page || data.page_num || 1;
+          const pageSize = data.size || data.page_size || 10;
+          const total = data.total || 0;
+          const hasNextExplicit = data.has_next;
           
           // 如果是第一页，替换数据；否则追加数据
           if (currentPage === 1) {
-            state.searchResults.data = newList;
+            state.searchResults.data = list;
           } else {
-            // 追加新数据，避免重复
             const existingIds = new Set(state.searchResults.data.map(item => item.id));
-            const uniqueNewItems = newList.filter(item => !existingIds.has(item.id));
+            const uniqueNewItems = list.filter(item => !existingIds.has(item.id));
             state.searchResults.data = [...state.searchResults.data, ...uniqueNewItems];
           }
           
-          const pageSize = action.payload.data.size || action.payload.data.page_size || 10;
-          const total = action.payload.data.total || 0;
-          
-          // 如果返回的列表为空，说明没有下一页了
-          let hasNext = newList.length > 0;
-          
-          // 如果返回了数据，再检查其他条件
-          if (hasNext) {
-            if (action.payload.data.has_next !== undefined) {
-              hasNext = Boolean(action.payload.data.has_next);
+          // 计算 has_next
+          let hasNext = list.length > 0;
+          if (hasNextExplicit !== undefined) {
+            hasNext = Boolean(hasNextExplicit);
             } else if (total > 0) {
               const currentTotal = state.searchResults.data.length;
               hasNext = currentTotal < total;
-            } else if (newList.length < pageSize) {
+          } else if (list.length < pageSize) {
               hasNext = false;
-            }
           }
           
           state.searchResults.pagination = {
@@ -959,5 +993,16 @@ const videoSlice = createSlice({
   },
 });
 
-export const { clearSearchResults, clearFilterResults, clearPlayUrl, clearEpisodes, selectQuality, setPlaybackProgress, clearPlaybackProgress, setPlayUrlFromEpisode } = videoSlice.actions;
+export const { 
+  clearSearchResults, 
+  clearFilterResults, 
+  clearPlayUrl, 
+  clearEpisodes, 
+  selectQuality, 
+  setPlaybackProgress, 
+  clearPlaybackProgress, 
+  setPlayUrlFromEpisode,
+  setCurrentCategory,
+  clearCategoryData,
+} = videoSlice.actions;
 export default videoSlice.reducer;

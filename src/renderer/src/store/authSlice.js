@@ -49,12 +49,15 @@ export const logoutUser = createAsyncThunk(
   }
 );
 
+const initialToken = localStorage.getItem('token') || null;
+
 const authSlice = createSlice({
   name: 'auth',
   initialState: {
     user: null,
-    token: localStorage.getItem('token') || null,
-    isAuthenticated: false,
+    token: initialToken,
+    // 如果本地有 token，视为已登录态，后续若 401 会自动清除
+    isAuthenticated: !!initialToken,
     loading: false,
     error: null,
   },
@@ -63,9 +66,29 @@ const authSlice = createSlice({
       state.error = null;
     },
     setToken: (state, action) => {
-      state.token = action.payload;
+      state.token = action.payload || null;
       state.isAuthenticated = !!action.payload;
+      if (action.payload) {
       localStorage.setItem('token', action.payload);
+      } else {
+        localStorage.removeItem('token');
+      }
+    },
+    setUser: (state, action) => {
+      state.user = action.payload;
+      state.isAuthenticated = !!state.token;
+    },
+    setAuthData: (state, action) => {
+      // 同时设置token和用户信息
+      const { token, user } = action.payload;
+      state.token = token || null;
+      state.user = user || null;
+      state.isAuthenticated = !!token;
+      if (token) {
+        localStorage.setItem('token', token);
+      } else {
+        localStorage.removeItem('token');
+      }
     },
   },
   extraReducers: (builder) => {
@@ -136,5 +159,5 @@ const authSlice = createSlice({
   },
 });
 
-export const { clearError, setToken } = authSlice.actions;
+export const { clearError, setToken, setUser, setAuthData } = authSlice.actions;
 export default authSlice.reducer;

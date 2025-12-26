@@ -1,25 +1,62 @@
 // api/user.js
 import apiClient from './client';
+import { getDevicePlatformAsync, getDevicePlatform } from '../utils/platform';
 
 // 用户注册
 // 根据API文档，需要包含 device 参数
-export const register = (userData) => {
-  // 如果没有提供device，自动生成（Electron应用）
+export const register = async (userData) => {
+  // 如果没有提供device，自动检测平台
+  let device = userData.device;
+  
+  if (!device) {
+    try {
+      // 尝试异步获取平台信息
+      device = await getDevicePlatformAsync();
+      console.log('注册 - 获取到的平台信息:', device);
+    } catch (error) {
+      // 如果异步获取失败，使用同步方法或默认值
+      console.error('注册 - 异步获取平台信息失败:', error);
+      device = getDevicePlatform();
+      console.log('注册 - 使用同步方法获取平台信息:', device);
+    }
+  }
+  
   const data = {
     ...userData,
-    device: userData.device || `Electron-${process.platform}`
+    device: device || 'DeskTop-Win' // 最后的默认值
   };
+  
+  console.log('注册 - 发送的数据:', { ...data, password: '***' });
+  
   return apiClient.post('/user/register', data);
 };
 
 // 用户登录
 // 根据API文档，需要包含 device 参数
-export const login = (credentials) => {
-  // 如果没有提供device，自动生成（Electron应用）
+export const login = async (credentials) => {
+  // 如果没有提供device，自动检测平台
+  let device = credentials.device;
+  
+  if (!device) {
+    try {
+      // 尝试异步获取平台信息
+      device = await getDevicePlatformAsync();
+      console.log('登录 - 获取到的平台信息:', device);
+    } catch (error) {
+      // 如果异步获取失败，使用同步方法或默认值
+      console.error('登录 - 异步获取平台信息失败:', error);
+      device = getDevicePlatform();
+      console.log('登录 - 使用同步方法获取平台信息:', device);
+    }
+  }
+  
   const data = {
     ...credentials,
-    device: credentials.device || `Electron-${process.platform}`
+    device: device || 'DeskTop-Win' // 最后的默认值
   };
+  
+  console.log('登录 - 发送的数据:', { ...data, password: '***' });
+  
   return apiClient.post('/user/login', data);
 };
 

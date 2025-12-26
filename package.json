@@ -15,7 +15,8 @@
     "build:all": "node build-all.js",
     "build:mac": "node build-all.js --mac-only",
     "build:win": "node build-all.js --win-only",
-    "build:react": "cd src/renderer && npm run build"
+    "build:react": "cd src/renderer && npm run build",
+    "build:icon": "node build/convert-icon.js"
   },
   "keywords": [
     "video",
@@ -30,7 +31,9 @@
     "concurrently": "^7.6.0",
     "electron": "^21.2.0",
     "electron-builder": "^23.6.0",
-    "nodemon": "^2.0.20"
+    "electron-icon-maker": "^0.0.5",
+    "nodemon": "^2.0.20",
+    "sharp": "^0.34.5"
   },
   "build": {
     "appId": "com.wtv.app",
@@ -38,6 +41,7 @@
     "directories": {
       "output": "dist"
     },
+    "icon": "build/icons/icon.png",
     "files": [
       "src/main/**/*",
       "src/renderer/build/**/*",
@@ -47,18 +51,27 @@
       "target": [
         {
           "target": "dmg",
-          "arch": ["x64", "arm64"]
+          "arch": [
+            "x64",
+            "arm64"
+          ]
         }
       ],
-      "category": "public.app-category.entertainment"
+      "category": "public.app-category.entertainment",
+      "icon": "build/icon.icns",
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false
     },
     "win": {
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
+      "icon": "build/icons/icon.ico",
       "sign": null,
       "signingHashAlgorithms": null,
       "certificateFile": null,
@@ -66,7 +79,18 @@
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "runAfterFinish": false,
+      "deleteAppDataOnUninstall": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "WTV",
+      "warningsAsErrors": false,
+      "packElevateHelper": false,
+      "differentialPackage": false,
+      "include": "build/installer.nsh",
+      "allowElevation": true,
+      "perMachine": false
     }
   },
   "dependencies": {

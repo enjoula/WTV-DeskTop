@@ -1,47 +1,72 @@
 // pages/Home.js
 import React, { useEffect } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useLocation } from 'react-router-dom'; // Link 仍然用于"查看更多"链接
 import { useSelector, useDispatch } from 'react-redux';
 import { fetchMovies, fetchTVShows, fetchAnime } from '../store/videoSlice';
 import VideoImage from '../components/VideoImage';
 import StarRating from '../components/StarRating';
+import { showCenterTip } from '../utils/tips';
 
 const Home = () => {
   const dispatch = useDispatch();
+  const location = useLocation();
   const { movies, tvShows, anime } = useSelector(state => {
     console.log('Redux state 更新:', state);
     return state.video;
   });
 
+  // 检查是否从注册页面跳转过来
+  useEffect(() => {
+    // 检查 location state 或 sessionStorage
+    const fromRegister = location.state?.fromRegister || sessionStorage.getItem('registerSuccess');
+    
+    if (fromRegister) {
+      // 在应用正中心显示注册成功提示，显示时长3秒
+      showCenterTip('注册成功，并进入系统', 1500);
+      // 清除标志，避免刷新后重复显示
+      sessionStorage.removeItem('registerSuccess');
+      // 清除 location state
+      if (location.state?.fromRegister) {
+        window.history.replaceState({}, document.title);
+      }
+    }
+  }, [location.state]);
+
   useEffect(() => {
     console.log('首页组件挂载，开始获取视频列表数据...');
     console.log('当前Redux状态:', { movies, tvShows, anime });
     
-    // 获取各类视频列表
-    dispatch(fetchMovies({ page: 1, size: 10 })) // API文档使用 size 而不是 page_size
-      .then(result => {
-        console.log('电影列表获取成功:', result);
-      })
-      .catch(error => {
-        console.error('电影列表获取失败:', error);
-      });
+    // 只在数据不存在且不在加载中时获取，避免重复调用
+    if ((!movies.data || movies.data.length === 0) && !movies.loading) {
+      dispatch(fetchMovies({ page: 1, size: 10 })) // API文档使用 size 而不是 page_size
+        .then(result => {
+          console.log('电影列表获取成功:', result);
+        })
+        .catch(error => {
+          console.error('电影列表获取失败:', error);
+        });
+    }
       
-    dispatch(fetchTVShows({ page: 1, size: 10 })) // API文档使用 size 而不是 page_size
-      .then(result => {
-        console.log('电视剧列表获取成功:', result);
-      })
-      .catch(error => {
-        console.error('电视剧列表获取失败:', error);
-      });
+    if ((!tvShows.data || tvShows.data.length === 0) && !tvShows.loading) {
+      dispatch(fetchTVShows({ page: 1, size: 10 })) // API文档使用 size 而不是 page_size
+        .then(result => {
+          console.log('电视剧列表获取成功:', result);
+        })
+        .catch(error => {
+          console.error('电视剧列表获取失败:', error);
+        });
+    }
       
-    dispatch(fetchAnime({ page: 1, size: 10 })) // API文档使用 size 而不是 page_size
-      .then(result => {
-        console.log('动漫列表获取成功:', result);
-      })
-      .catch(error => {
-        console.error('动漫列表获取失败:', error);
-      });
-  }, [dispatch]);
+    if ((!anime.data || anime.data.length === 0) && !anime.loading) {
+      dispatch(fetchAnime({ page: 1, size: 10 })) // API文档使用 size 而不是 page_size
+        .then(result => {
+          console.log('动漫列表获取成功:', result);
+        })
+        .catch(error => {
+          console.error('动漫列表获取失败:', error);
+        });
+    }
+  }, [dispatch]); // 移除数据依赖，只在组件挂载时调用一次
 
   // 添加渲染调试信息
   console.log('Home组件渲染，movies数据:', movies);
@@ -73,10 +98,15 @@ const Home = () => {
             
             return (
               <div key={video.id} className="video-card">
-                <Link 
-                  to={`/video/${video.id}`} 
-                  state={{ video }} // 传递完整的视频信息
+                <div 
+                  onClick={() => {
+                    // 在新窗口打开视频详情页
+                    if (window.electronAPI && window.electronAPI.openVideoWindow) {
+                      window.electronAPI.openVideoWindow(video.id, video);
+                    }
+                  }}
                   className="video-card-link"
+                  style={{ cursor: 'pointer' }}
                 >
                   <div className="video-card-image">
                     <VideoImage src={video.cover_url} alt={video.title || '视频封面'} />
@@ -98,7 +128,7 @@ const Home = () => {
                     )}
                     </div>
                   </div>
-                </Link>
+                </div>
               </div>
             );
           })}
@@ -110,7 +140,7 @@ const Home = () => {
   return (
     <div className="home-page">
       <div className="hero-section">
-        <h1>欢迎来到看视频</h1>
+        <h1>欢迎来到WTV</h1>
         <p>发现最新最热的影视作品，随时随地享受观影乐趣</p>
       </div>
       
