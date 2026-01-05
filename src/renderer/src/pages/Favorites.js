@@ -36,7 +36,6 @@ const Favorites = () => {
     }
     
     // 在收藏页面，所有视频都是已收藏状态，所以点击就是取消收藏
-    const wasFavorite = true;
     
     try {
       const response = await toggleFavorite(videoId);
@@ -51,18 +50,18 @@ const Favorites = () => {
 
         // 根据状态显示相应提示（在收藏页，取消收藏后会从列表中移除）
         if (isFavFromData === false || isFavFromData === undefined) {
-          // 取消收藏成功
-          showCenterTip('取消收藏成功', 1500);
+          // 取消收藏
+          showCenterTip('取消收藏');
         } else {
           // 理论上不应该出现，但如果返回已收藏，也显示相应提示
-          showCenterTip('收藏成功', 1500);
+          showCenterTip('收藏成功');
         }
-        // 重新获取收藏列表，从第一页开始
-        setPage(1);
-        dispatch(fetchFavorites({ page: 1, size: 20 }));
+      // 重新获取收藏列表，从第一页开始
+      setPage(1);
+      dispatch(fetchFavorites({ page: 1, size: 20 }));
       } else if (code === 401) {
         // 401：账号在其他设备登录
-        showCenterTip('账号在其它设备登录，当前设备已下线', 1500);
+        showCenterTip('账号在其它设备登录，当前设备已下线');
         // 延迟跳转，让用户看到提示
         setTimeout(() => {
           dispatch(logoutUser()).then(() => {
@@ -71,15 +70,15 @@ const Favorites = () => {
         }, 1000);
       } else if (code === 400) {
         // 400：视频ID不能为空
-        showCenterTip('视频ID不能为空！', 1500);
+        showCenterTip('视频ID不能为空！');
         // 页面不做任何变更
       } else if (code === 500) {
         // 500：操作过快
-        showCenterTip('操作过快，请稍后重试！', 1500);
+        showCenterTip('操作过快，请稍后重试！');
       } else {
         // 其他错误
         const errorMsg = resData.message || '操作失败，请稍后重试';
-        showCenterTip(errorMsg, 1500);
+        showCenterTip(errorMsg);
       }
     } catch (err) {
       console.error('切换收藏状态失败:', err);
@@ -87,19 +86,19 @@ const Favorites = () => {
       const code = resData.code;
 
       if (code === 401) {
-        showCenterTip('账号在其它设备登录，当前设备已下线', 1500);
+        showCenterTip('账号在其它设备登录，当前设备已下线');
         setTimeout(() => {
           dispatch(logoutUser()).then(() => {
             navigate('/login');
           });
         }, 1000);
       } else if (code === 400) {
-        showCenterTip('视频ID不能为空！', 1500);
+        showCenterTip('视频ID不能为空！');
       } else if (code === 500) {
-        showCenterTip('操作过快，请稍后重试！', 1500);
+        showCenterTip('操作过快，请稍后重试！');
       } else {
         const errorMsg = resData.message || err?.message || '操作失败，请稍后重试';
-        showCenterTip(errorMsg, 1500);
+        showCenterTip(errorMsg);
       }
     }
   };
@@ -135,6 +134,9 @@ const Favorites = () => {
                         // 在新窗口打开视频详情页
                         if (window.electronAPI && window.electronAPI.openVideoWindow) {
                           window.electronAPI.openVideoWindow(video.id, video);
+                        } else {
+                          // 降级处理：如果没有 Electron API，使用 navigate（开发环境可能用到）
+                          navigate(`/video/${video.id}`, { state: { video } });
                         }
                       }}
                       className="favorite-card-link"
@@ -165,10 +167,9 @@ const Favorites = () => {
                       <div className="favorite-card-content">
                         <h3 className="favorite-card-title">{video.title}</h3>
                         <div className="favorite-card-meta">
-                          {video.release_date && (
+                          {video.created_at && (
                             <div className="video-release-date">
-                              <span className="meta-label">上映:</span>
-                              <span className="meta-value">{video.release_date}</span>
+                              <span className="meta-label">收藏:</span> <span className="meta-value">{video.created_at.split(' ')[0]}</span>
                           </div>
                           )}
                         </div>

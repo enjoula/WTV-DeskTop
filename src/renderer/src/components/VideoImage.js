@@ -1,5 +1,6 @@
 // components/VideoImage.js
 import React, { useState, useEffect, useRef } from 'react';
+import { cacheImage } from '../utils/imageCache';
 
 // 简单的SVG占位图（base64编码）
 const PLACEHOLDER_SVG = 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMzAwIiBoZWlnaHQ9IjQwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwJSIgaGVpZ2h0PSIxMDAlIiBmaWxsPSIjZjBmMGYwIi8+PHRleHQgeD0iNTAlIiB5PSI1MCUiIGZvbnQtZmFtaWx5PSJBcmlhbCwgc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxNCIgZmlsbD0iIzk5OTk5OSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZHk9Ii4zZW0iPuaXoOazleWKoOi9veWbvueJhzwvdGV4dD48L3N2Zz4=';
@@ -90,7 +91,7 @@ const VideoImage = ({ src, alt, className = '' }) => {
     setIsLoading(false);
   };
 
-  const handleLoad = () => {
+  const handleLoad = async () => {
     // 清除超时定时器
     if (timeoutRef.current) {
       clearTimeout(timeoutRef.current);
@@ -100,57 +101,28 @@ const VideoImage = ({ src, alt, className = '' }) => {
     setIsLoading(false);
     setHasError(false);
     setRetryCount(0);
+    
+    // 图片加载成功后，缓存图片
+    if (src && isValidUrl(src) && imgSrc === src) {
+      // 异步缓存，不阻塞渲染
+      cacheImage(src).catch(error => {
+        console.warn('缓存图片失败:', error, src);
+      });
+    }
   };
 
   // 如果src变化，重置状态
   useEffect(() => {
-    // 清除之前的超时定时器
-    if (timeoutRef.current) {
-      clearTimeout(timeoutRef.current);
-      timeoutRef.current = null;
-    }
-    
     if (src && isValidUrl(src)) {
-      // 当src变化时，总是更新（即使当前是占位图）
-      if (imgSrc !== src && !imgSrc.startsWith(src)) {
-        setImgSrc(src);
-        setIsLoading(true);
-        setHasError(false);
-        setRetryCount(0);
-        
-        // 设置30秒超时
-        timeoutRef.current = setTimeout(() => {
-          console.warn('图片加载超时（30秒）:', src);
-          setImgSrc((currentSrc) => {
-            // 只有在当前不是占位图且是原始src时才切换
-            if (currentSrc !== PLACEHOLDER_SVG && (currentSrc === src || currentSrc.startsWith(src))) {
-              return PLACEHOLDER_SVG;
-            }
-            return currentSrc;
-          });
-          setHasError(true);
-          setIsLoading(false);
-          timeoutRef.current = null;
-        }, 30000); // 30秒超时
-      }
+      setImgSrc(src);
+      setIsLoading(true);
+      setHasError(false);
+      setRetryCount(0);
     } else {
-      // 如果src无效或为空，使用占位图
-      if (imgSrc !== PLACEHOLDER_SVG) {
-        setImgSrc(PLACEHOLDER_SVG);
-        setIsLoading(false);
-        setHasError(true);
-        setRetryCount(0);
-      }
+      setImgSrc(PLACEHOLDER_SVG);
+      setIsLoading(false);
+      setHasError(true);
     }
-    
-    // 组件卸载时清除定时器
-    return () => {
-      if (timeoutRef.current) {
-        clearTimeout(timeoutRef.current);
-        timeoutRef.current = null;
-      }
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [src]);
 
   const finalSrc = isValidUrl(imgSrc) ? imgSrc : PLACEHOLDER_SVG;
@@ -163,7 +135,7 @@ const VideoImage = ({ src, alt, className = '' }) => {
   }, [src, imgSrc, finalSrc]);
 
   return (
-    <div className={`video-image-wrapper ${className}`} style={{ position: 'relative', width: '100%', height: '100%', overflow: 'hidden', backgroundColor: '#f0f0f0' }}>
+    <div className={`video-image-wrapper ${className}`} style={{ position: 'relative', width: '100%', height: '100%', overflow: 'hidden', backgroundColor: (isLoading || hasError) ? '#f0f0f0' : 'transparent' }}>
       {isLoading && !hasError && (
         <div 
           style={{
@@ -197,7 +169,7 @@ const VideoImage = ({ src, alt, className = '' }) => {
           objectFit: 'cover',
           objectPosition: 'center',
           display: 'block',
-          backgroundColor: '#f0f0f0',
+          backgroundColor: (isLoading || hasError) ? '#f0f0f0' : 'transparent',
           position: 'relative',
           zIndex: 0,
           imageRendering: 'auto',
@@ -211,7 +183,6 @@ const VideoImage = ({ src, alt, className = '' }) => {
         }}
         loading={className.includes('video-poster-image') ? 'eager' : 'lazy'}
         decoding="async"
-        crossOrigin={imgSrc === PLACEHOLDER_SVG || !isValidUrl(imgSrc) ? undefined : "anonymous"}
         referrerPolicy="no-referrer"
       />
     </div>

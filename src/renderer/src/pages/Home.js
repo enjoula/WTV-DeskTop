@@ -1,6 +1,6 @@
 // pages/Home.js
 import React, { useEffect } from 'react';
-import { Link, useLocation } from 'react-router-dom'; // Link 仍然用于"查看更多"链接
+import { Link, useLocation, useNavigate } from 'react-router-dom'; // Link 仍然用于"查看更多"链接
 import { useSelector, useDispatch } from 'react-redux';
 import { fetchMovies, fetchTVShows, fetchAnime } from '../store/videoSlice';
 import VideoImage from '../components/VideoImage';
@@ -10,6 +10,7 @@ import { showCenterTip } from '../utils/tips';
 const Home = () => {
   const dispatch = useDispatch();
   const location = useLocation();
+  const navigate = useNavigate();
   const { movies, tvShows, anime } = useSelector(state => {
     console.log('Redux state 更新:', state);
     return state.video;
@@ -22,7 +23,7 @@ const Home = () => {
     
     if (fromRegister) {
       // 在应用正中心显示注册成功提示，显示时长3秒
-      showCenterTip('注册成功，并进入系统', 1500);
+      showCenterTip('注册成功，并进入系统');
       // 清除标志，避免刷新后重复显示
       sessionStorage.removeItem('registerSuccess');
       // 清除 location state
@@ -38,33 +39,33 @@ const Home = () => {
     
     // 只在数据不存在且不在加载中时获取，避免重复调用
     if ((!movies.data || movies.data.length === 0) && !movies.loading) {
-      dispatch(fetchMovies({ page: 1, size: 10 })) // API文档使用 size 而不是 page_size
-        .then(result => {
-          console.log('电影列表获取成功:', result);
-        })
-        .catch(error => {
-          console.error('电影列表获取失败:', error);
-        });
+    dispatch(fetchMovies({ page: 1, size: 10 })) // API文档使用 size 而不是 page_size
+      .then(result => {
+        console.log('电影列表获取成功:', result);
+      })
+      .catch(error => {
+        console.error('电影列表获取失败:', error);
+      });
     }
       
     if ((!tvShows.data || tvShows.data.length === 0) && !tvShows.loading) {
-      dispatch(fetchTVShows({ page: 1, size: 10 })) // API文档使用 size 而不是 page_size
-        .then(result => {
-          console.log('电视剧列表获取成功:', result);
-        })
-        .catch(error => {
-          console.error('电视剧列表获取失败:', error);
-        });
+    dispatch(fetchTVShows({ page: 1, size: 10 })) // API文档使用 size 而不是 page_size
+      .then(result => {
+        console.log('电视剧列表获取成功:', result);
+      })
+      .catch(error => {
+        console.error('电视剧列表获取失败:', error);
+      });
     }
       
     if ((!anime.data || anime.data.length === 0) && !anime.loading) {
-      dispatch(fetchAnime({ page: 1, size: 10 })) // API文档使用 size 而不是 page_size
-        .then(result => {
-          console.log('动漫列表获取成功:', result);
-        })
-        .catch(error => {
-          console.error('动漫列表获取失败:', error);
-        });
+    dispatch(fetchAnime({ page: 1, size: 10 })) // API文档使用 size 而不是 page_size
+      .then(result => {
+        console.log('动漫列表获取成功:', result);
+      })
+      .catch(error => {
+        console.error('动漫列表获取失败:', error);
+      });
     }
   }, [dispatch]); // 移除数据依赖，只在组件挂载时调用一次
 
@@ -103,6 +104,9 @@ const Home = () => {
                     // 在新窗口打开视频详情页
                     if (window.electronAPI && window.electronAPI.openVideoWindow) {
                       window.electronAPI.openVideoWindow(video.id, video);
+                    } else {
+                      // 降级处理：如果没有 Electron API，使用 navigate（开发环境可能用到）
+                      navigate(`/video/${video.id}`, { state: { video } });
                     }
                   }}
                   className="video-card-link"
@@ -122,8 +126,7 @@ const Home = () => {
                     <div className="video-card-meta">
                       {video.release_date && (
                         <div className="video-release-date">
-                          <span className="meta-label">上映:</span>
-                          <span className="meta-value">{video.release_date}</span>
+                          <span className="meta-label">首映:</span> <span className="meta-value">{video.release_date}</span>
                       </div>
                     )}
                     </div>

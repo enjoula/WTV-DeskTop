@@ -29,17 +29,17 @@
   "license": "MIT",
   "devDependencies": {
     "concurrently": "^7.6.0",
-    "electron": "^21.2.0",
-    "electron-builder": "^23.6.0",
+    "electron": "^39.2.7",
+    "electron-builder": "^26.0.12",
     "electron-icon-maker": "^0.0.5",
-    "nodemon": "^2.0.20",
+    "nodemon": "^3.1.11",
     "sharp": "^0.34.5"
   },
   "build": {
     "appId": "com.wtv.app",
     "productName": "WTV",
     "directories": {
-      "output": "dist"
+      "output": "dist/windows"
     },
     "icon": "build/icons/icon.png",
     "files": [
@@ -71,11 +71,7 @@
           ]
         }
       ],
-      "icon": "build/icons/icon.ico",
-      "sign": null,
-      "signingHashAlgorithms": null,
-      "certificateFile": null,
-      "certificatePassword": null
+      "icon": "build/icons/icon.ico"
     },
     "nsis": {
       "oneClick": false,

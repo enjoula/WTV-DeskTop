@@ -1,5 +1,8 @@
-const { app, BrowserWindow, ipcMain, session } = require('electron');
+const { app, BrowserWindow, ipcMain, session, net } = require('electron');
 const path = require('path');
+const fs = require('fs');
+
+console.log('📦 [主进程] main.js 正在加载...');
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling.
 if (require('electron-squirrel-startup')) {
@@ -11,10 +14,115 @@ let videoWindow = null; // 只保留一个视频窗口
 // 存储当前视频窗口的视频数据，用于传递给渲染进程
 let currentVideoData = null;
 
+let pngsucaiCookie = '';
+
+// 获取 pngsucai 的 cookie
+const updatePngsucaiCookie = () => {
+  console.log('🚀 [主进程] 开始请求 pngsucai 获取 Cookie...');
+  try {
+    const request = net.request({
+      method: 'GET',
+      url: 'https://www.pngsucai.com/',
+      redirect: 'follow'
+    });
+    
+    // 模拟浏览器头
+    request.setHeader('User-Agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36');
+    request.setHeader('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8');
+    
+    request.on('response', (response) => {
+      console.log(`📡 [主进程] pngsucai 响应状态码: ${response.statusCode}`);
+      const setCookies = response.headers['set-cookie'];
+      
+      if (setCookies) {
+        const cookies = Array.isArray(setCookies) ? setCookies : [setCookies];
+        const cookieStrings = cookies.map(c => c.split(';')[0]);
+        pngsucaiCookie = cookieStrings.join('; ');
+        console.log('✅ [主进程] 成功获取 pngsucai Cookie:', pngsucaiCookie);
+      } else {
+        console.warn('⚠️ [主进程] pngsucai 响应中没有 set-cookie 头部');
+        // 打印所有头部以供调试
+        console.log('[主进程] 响应头部详情:', JSON.stringify(response.headers));
+      }
+    });
+    
+    request.on('error', (err) => {
+      console.error('❌ [主进程] 请求 pngsucai 出错:', err.message);
+    });
+    
+    request.end();
+  } catch (err) {
+    console.error('❌ [主进程] updatePngsucaiCookie 抛出异常:', err);
+  }
+};
+
 const createWindow = () => {
+  console.log('🏁 [主进程] createWindow 函数开始执行...');
+  // 初始获取一次 pngsucai 的 cookie
+  updatePngsucaiCookie();
+  
+  // 定期更新 pngsucai 的 cookie (每30分钟)
+  setInterval(updatePngsucaiCookie, 30 * 60 * 1000);
+
   // 配置 session 以支持跨域图片请求
   const ses = session.defaultSession;
   
+  // 设置请求头，添加用户要求的 Cookie（用于获取头像等图片）
+  ses.webRequest.onBeforeSendHeaders((details, callback) => {
+    const requestHeaders = {
+      ...details.requestHeaders,
+    };
+    
+    // 如果是获取图片的请求，或者到后端服务器的请求，添加指定的 Cookie
+    const isImageRequest = /\.(png|jpg|jpeg|gif|webp|svg|ico)(\?.*)?$/i.test(details.url);
+    const isBackendRequest = details.url.includes('124.222.196.128');
+    // 修改识别逻辑：只要是 pngsucai.com 的图片请求，都视为需要注入 Cookie 的头像/素材请求
+    const isPngsucaiRequest = details.url.includes('pngsucai.com');
+    
+    // 如果是 pngsucai 的请求，使用从其主站获取的 cookie
+    if (isPngsucaiRequest && pngsucaiCookie) {
+      console.log('正在为 pngsucai 请求注入 Cookie:', details.url);
+      requestHeaders['Cookie'] = pngsucaiCookie;
+      // 必须伪装 Referer 和 Origin 以绕过防盗链
+      requestHeaders['Referer'] = 'https://www.pngsucai.com/';
+      requestHeaders['Origin'] = 'https://www.pngsucai.com';
+      // 添加额外的浏览器模拟头
+      requestHeaders['accept'] = 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8';
+      requestHeaders['accept-language'] = 'zh-CN,zh;q=0.9,en;q=0.8';
+      requestHeaders['sec-ch-ua'] = '"Google Chrome";v="143", "Chromium";v="143", "Not A(Brand";v="24"';
+      requestHeaders['sec-ch-ua-mobile'] = '?0';
+      requestHeaders['sec-ch-ua-platform'] = '"macOS"';
+      requestHeaders['sec-fetch-dest'] = 'image';
+      requestHeaders['sec-fetch-mode'] = 'no-cors';
+      requestHeaders['sec-fetch-site'] = 'cross-site';
+      requestHeaders['user-agent'] = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36';
+    } else if (isImageRequest || isBackendRequest) {
+      // 其他图片或后端请求使用默认 Cookie
+      requestHeaders['Cookie'] = 'server_name_session=245619b23edc8a717a124f4092302064; img_auth=1767519930-102f39147b977d127328185881522622; Hm_lvt_386c683f3b0c25ee5b0bf789967980f8=1767519930; Hm_lpvt_386c683f3b0c25ee5b0bf789967980f8=1767519930; HMACCOUNT=2CDC1E500F1FB63C';
+    }
+
+    // 如果是豆瓣图片的请求，添加特定的请求头以绕过防盗链
+    if (details.url.includes('doubanio')) {
+      requestHeaders['Referer'] = 'https://www.douban.com/';
+      requestHeaders['Origin'] = 'https://www.douban.com';
+      requestHeaders['accept'] = 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8';
+      requestHeaders['accept-language'] = 'zh-CN,zh;q=0.9,en;q=0.8';
+      requestHeaders['cache-control'] = 'no-cache';
+      requestHeaders['dnt'] = '1';
+      requestHeaders['pragma'] = 'no-cache';
+      requestHeaders['priority'] = 'u=0, i';
+      requestHeaders['sec-ch-ua'] = '"Google Chrome";v="143", "Chromium";v="143", "Not A(Brand";v="24"';
+      requestHeaders['sec-ch-ua-mobile'] = '?0';
+      requestHeaders['sec-ch-ua-platform'] = '"macOS"';
+      requestHeaders['sec-fetch-dest'] = 'image';
+      requestHeaders['sec-fetch-mode'] = 'no-cors';
+      requestHeaders['sec-fetch-site'] = 'cross-site';
+      requestHeaders['user-agent'] = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36';
+    }
+    
+    callback({ requestHeaders: requestHeaders });
+  });
+
   // 设置 CORS 头，允许跨域请求图片和其他资源
   ses.webRequest.onHeadersReceived((details, callback) => {
     // 为所有响应添加 CORS 头
@@ -22,12 +130,60 @@ const createWindow = () => {
       ...details.responseHeaders,
     };
     
-    // 添加 CORS 头，支持视频流和 Range 请求
-    responseHeaders['Access-Control-Allow-Origin'] = ['*'];
+    // 移除原有可能冲突的 CORS 头（不区分大小写）
+    Object.keys(responseHeaders).forEach(key => {
+      const lowerKey = key.toLowerCase();
+      if (lowerKey === 'access-control-allow-origin' || 
+          lowerKey === 'access-control-allow-methods' || 
+          lowerKey === 'access-control-allow-headers' || 
+          lowerKey === 'access-control-allow-credentials' ||
+          lowerKey === 'content-security-policy' ||
+          lowerKey === 'content-security-policy-report-only') {
+        delete responseHeaders[key];
+      }
+    });
+
+    // 动态获取请求来源 (Origin)
+    // 在 onHeadersReceived 中通过 details.referrer 或默认值判断
+    let requestOrigin = '*';
+    if (details.referrer) {
+      try {
+        const refUrl = new URL(details.referrer);
+        requestOrigin = refUrl.origin;
+      } catch (e) {
+        requestOrigin = '*';
+      }
+    }
+    
+    // 如果无法从 referrer 获取，且是在开发环境，指向本地服务器
+    if (requestOrigin === '*' || requestOrigin === 'null') {
+      requestOrigin = 'http://localhost:3000'; 
+    }
+
+    // 强制注入最宽松的跨域许可
+    responseHeaders['Access-Control-Allow-Origin'] = [requestOrigin];
     responseHeaders['Access-Control-Allow-Methods'] = ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'HEAD'];
-    responseHeaders['Access-Control-Allow-Headers'] = ['Content-Type', 'Authorization', 'X-Requested-With', 'Range'];
+    responseHeaders['Access-Control-Allow-Headers'] = ['*'];
     responseHeaders['Access-Control-Allow-Credentials'] = ['true'];
-    responseHeaders['Access-Control-Expose-Headers'] = ['Content-Length', 'Content-Range', 'Accept-Ranges'];
+    responseHeaders['Access-Control-Expose-Headers'] = ['*'];
+
+    // 如果是视频流或特定图片的请求，额外处理
+    const isVideoStream = details.url.includes('.m3u8') || details.url.includes('.ts') || details.url.includes('.mp4');
+    if (details.url.includes('doubanio') || details.url.includes('pngsucai.com') || isVideoStream) {
+      if (isVideoStream) console.log('📽️ 正在为视频流响应注入 CORS 头:', details.url);
+      delete responseHeaders['x-frame-options'];
+      delete responseHeaders['content-security-policy'];
+      delete responseHeaders['content-security-policy-report-only'];
+      
+      // 确保内容类型正确
+      if (details.url.includes('.webp')) {
+        responseHeaders['Content-Type'] = ['image/webp'];
+      } else if (details.url.includes('.m3u8')) {
+        responseHeaders['Content-Type'] = ['application/x-mpegURL'];
+      } else if (details.url.includes('.ts')) {
+        responseHeaders['Content-Type'] = ['video/MP2T'];
+      }
+    }
     
     callback({
       responseHeaders: responseHeaders,
@@ -36,10 +192,10 @@ const createWindow = () => {
 
   // Create the browser window.
   mainWindow = new BrowserWindow({
-    width: 1600,
-    height: 900,
+    width: 1450,
+    height: 950,
     minWidth: 1100,
-    minHeight: 600,
+    minHeight: 850,
     title: '看视频 - WTV',
     backgroundColor: '#f5f5f5', // 设置背景色，避免白屏闪烁
     autoHideMenuBar: true, // 自动隐藏菜单栏（Windows 和 Linux）
@@ -182,22 +338,22 @@ const createWindow = () => {
       
       // 如果 loadFile 失败，尝试使用 loadURL 作为备用
       console.log('Trying with loadURL as fallback...');
-      
-      // 构建正确的 file:// URL
-      let fileUrl;
-      if (process.platform === 'win32') {
-        // Windows 路径处理：file:///C:/path/to/file
+    
+    // 构建正确的 file:// URL
+    let fileUrl;
+    if (process.platform === 'win32') {
+      // Windows 路径处理：file:///C:/path/to/file
         // 将反斜杠转换为正斜杠，保留冒号（Windows 驱动器号需要冒号）
         const normalizedPath = indexPath.replace(/\\/g, '/');
         // Windows 路径需要以 file:/// 开头
         // 对于 asar 文件，路径格式：file:///C:/path/to/app.asar/src/renderer/build/index.html
         fileUrl = `file:///${normalizedPath}`;
-      } else {
-        // macOS/Linux 路径处理：file:///path/to/file
-        // 对于 asar 文件，路径应该是：file:///path/to/app.asar/src/renderer/build/index.html
-        fileUrl = `file://${indexPath}`;
-      }
-      
+    } else {
+      // macOS/Linux 路径处理：file:///path/to/file
+      // 对于 asar 文件，路径应该是：file:///path/to/app.asar/src/renderer/build/index.html
+      fileUrl = `file://${indexPath}`;
+    }
+    
       console.log('Trying URL:', fileUrl);
       mainWindow.loadURL(fileUrl).catch(err2 => {
         console.error('Failed to load with loadURL:', err2);
@@ -435,9 +591,6 @@ ipcMain.handle('get-app-version', () => {
 
 // 获取 VersionCode（用于版本检测和升级）
 ipcMain.handle('get-version-code', () => {
-  const fs = require('fs');
-  const path = require('path');
-  
   try {
     // 尝试从应用路径读取 package.json
     let packageJsonPath;
@@ -445,21 +598,40 @@ ipcMain.handle('get-version-code', () => {
       // 打包后的应用，package.json 在 app.asar 中
       packageJsonPath = path.join(app.getAppPath(), 'package.json');
     } else {
-      // 开发环境，使用相对路径
-      packageJsonPath = path.join(__dirname, '..', 'package.json');
+      // 开发环境，尝试多个可能的路径
+      const possiblePaths = [
+        path.join(__dirname, '..', '..', 'package.json'),
+        path.join(__dirname, '..', 'package.json'),
+        path.join(process.cwd(), 'package.json')
+      ];
+      
+      for (const p of possiblePaths) {
+        if (fs.existsSync(p)) {
+          packageJsonPath = p;
+          break;
+        }
+      }
+      
+      // 如果都找不到，回退到第一个
+      if (!packageJsonPath) {
+        packageJsonPath = possiblePaths[0];
+      }
     }
     
-    const packageJsonContent = fs.readFileSync(packageJsonPath, 'utf8');
-    const packageJson = JSON.parse(packageJsonContent);
-    return packageJson.versionCode || 1;
+    if (fs.existsSync(packageJsonPath)) {
+      const packageJsonContent = fs.readFileSync(packageJsonPath, 'utf8');
+      const packageJson = JSON.parse(packageJsonContent);
+      return packageJson.versionCode || 1;
+    }
+    throw new Error('package.json not found');
   } catch (error) {
-    console.error('读取 VersionCode 失败:', error);
-    // 如果读取失败，尝试直接 require（在开发环境可能有效）
+    console.error('读取 VersionCode 失败:', error.message);
+    // 降级处理：尝试直接使用 require
     try {
-      const packageJson = require(path.join(__dirname, '..', 'package.json'));
+      // 使用动态路径
+      const packageJson = require('../../package.json');
       return packageJson.versionCode || 1;
     } catch (err) {
-      console.error('通过 require 读取 VersionCode 也失败:', err);
       return 1; // 默认返回 1
     }
   }
@@ -505,6 +677,55 @@ ipcMain.handle('open-external', (event, url) => {
   return shell.openExternal(url);
 });
 
+// 创建新窗口打开指定页面
+ipcMain.handle('open-page-window', (event, pagePath, title) => {
+  const isDevelopment = !app.isPackaged && process.env.NODE_ENV !== 'production';
+  
+  let pageWindow = new BrowserWindow({
+    width: 1000,
+    height: 800,
+    minWidth: 800,
+    minHeight: 600,
+    title: title || 'WTV',
+    backgroundColor: '#0f0f0f',
+    autoHideMenuBar: true,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      nodeIntegration: false,
+      contextIsolation: true,
+      webSecurity: false,
+      session: session.defaultSession,
+    },
+  });
+
+  if (process.platform === 'win32') {
+    pageWindow.setMenuBarVisibility(false);
+  }
+
+  if (isDevelopment) {
+    const url = `http://localhost:3000/#${pagePath}?newWindow=true`;
+    pageWindow.loadURL(url);
+  } else {
+    const appPath = app.getAppPath();
+    let indexPath = path.join(appPath, 'src', 'renderer', 'build', 'index.html');
+    
+    // 生产环境路径兼容逻辑
+    const fs = require('fs');
+    if (!fs.existsSync(indexPath)) {
+      indexPath = path.join(appPath, 'renderer', 'build', 'index.html');
+    }
+    if (!fs.existsSync(indexPath)) {
+      indexPath = path.join(appPath, 'build', 'index.html');
+    }
+
+    pageWindow.loadFile(indexPath).then(() => {
+      pageWindow.webContents.executeJavaScript(`window.location.hash = '#${pagePath}?newWindow=true';`);
+    });
+  }
+
+  return pageWindow.id;
+});
+
 // 创建新窗口打开视频详情页（只保留一个窗口）
 ipcMain.handle('open-video-window', (event, videoId, videoData) => {
   // 判断是否为开发环境
@@ -534,14 +755,17 @@ ipcMain.handle('open-video-window', (event, videoId, videoData) => {
     return videoWindow.id;
   }
   
+  // 保存视频数据，供渲染进程通过 IPC 获取
+  currentVideoData = videoData;
+  
   // 创建新窗口（比主窗口小，不显示导航栏）
   // 使用视频标题（如果有），避免显示默认的 "看视频 - WTV"
   const initialTitle = videoData?.title || '视频详情';
   videoWindow = new BrowserWindow({
     width: 1300,
-    height: 700,
+    height: 850,
     minWidth: 1100,
-    minHeight: 600,
+    minHeight: 800,
     title: initialTitle,
     backgroundColor: '#f5f5f5', // 设置背景色，避免白屏闪烁
     autoHideMenuBar: true,
@@ -563,6 +787,7 @@ ipcMain.handle('open-video-window', (event, videoId, videoData) => {
   videoWindow.on('closed', () => {
     stopTitleCheck();
     videoWindow = null;
+    currentVideoData = null; // 窗口关闭时清除视频数据
   });
   
   // 保存视频标题，用于后续事件处理
@@ -718,10 +943,8 @@ ipcMain.handle('get-video-data', (event) => {
   // 只允许从视频窗口获取数据
   if (videoWindow && !videoWindow.isDestroyed() && event.sender === videoWindow.webContents) {
     const data = currentVideoData;
-    // 获取后清除，避免数据残留
-    if (data) {
-      currentVideoData = null;
-    }
+    // 不立即清除数据，因为页面可能需要多次获取（例如在 useEffect 中）
+    // 数据会在窗口关闭或打开新视频时被覆盖
     return data;
   }
   return null;

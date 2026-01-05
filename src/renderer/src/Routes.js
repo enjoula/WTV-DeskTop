@@ -12,6 +12,8 @@ import Profile from './pages/Profile';
 import Search from './pages/Search';
 import Favorites from './pages/Favorites';
 import PlayHistory from './pages/PlayHistory';
+import TermsOfService from './pages/TermsOfService';
+import AboutUs from './pages/AboutUs';
 import TestPage from './pages/TestPage';
 import DiagnosticPage from './pages/DiagnosticPage';
 import PlaybackTestPage from './pages/PlaybackTestPage';
@@ -41,6 +43,8 @@ function RoutesComponent() {
           <Route path="/search" element={<Search />} />
           <Route path="/play-history" element={<PlayHistory />} />
           <Route path="/favorites" element={<Favorites />} />
+          <Route path="/terms" element={<TermsOfService />} />
+          <Route path="/about" element={<AboutUs />} />
           <Route path="/test" element={<TestPage />} />
           <Route path="/diagnostic" element={<DiagnosticPage />} />
           <Route path="/playback-test" element={<PlaybackTestPage />} />

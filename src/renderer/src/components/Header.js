@@ -12,7 +12,47 @@ const Header = () => {
   const { isAuthenticated, user } = useSelector(state => state.auth);
   const { currentCategory } = useSelector(state => state.video || {});
   const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [avatarError, setAvatarError] = useState(false);
   const dropdownRef = useRef(null);
+
+  // 处理头像URL，确保是完整URL
+  const processAvatarUrl = (url) => {
+    if (!url) return null;
+    
+    // 如果已经是完整URL，直接返回
+    if (url.startsWith('http://') || url.startsWith('https://')) {
+      return url;
+    }
+    
+    // 如果是相对路径，需要拼接API基础URL
+    const getBaseURL = () => {
+      const isElectron = typeof window !== 'undefined' && (
+        window.electronAPI || 
+        window.location.protocol === 'file:' ||
+        navigator.userAgent.includes('Electron')
+      );
+      
+      if (isElectron) {
+        return 'http://124.222.196.128:6660';
+      }
+      
+      if (process.env.NODE_ENV === 'development') {
+        return '/api';
+      }
+      
+      return 'http://124.222.196.128:6660';
+    };
+    
+    const baseURL = getBaseURL();
+    
+    // 如果URL以/开头，直接拼接
+    if (url.startsWith('/')) {
+      return `${baseURL}${url}`;
+    }
+    
+    // 否则添加/后拼接
+    return `${baseURL}/${url}`;
+  };
 
   const handleLogout = () => {
     dispatch(logoutUser()).then(() => {
@@ -32,6 +72,11 @@ const Header = () => {
       });
     }
   }, [isAuthenticated, user, dispatch]);
+
+  // 当用户信息变化时，重置头像错误状态
+  React.useEffect(() => {
+    setAvatarError(false);
+  }, [user?.avatar_url, user?.avatar]);
 
   // 登录后拉取一次用户收藏列表，避免详情页无法识别已收藏状态
   // 使用 ref 避免重复调用
@@ -133,13 +178,19 @@ const Header = () => {
                 <button className="user-dropdown-toggle" onClick={toggleMenu}>
                   <div className="user-toggle-content">
                     <div className="user-avatar">
-                      {user?.avatar_url || user?.avatar ? (
+                      {(user?.avatar_url || user?.avatar) && !avatarError ? (
                         <img
-                          src={user.avatar_url || user.avatar}
+                          src={processAvatarUrl(user.avatar_url || user.avatar)}
                           alt={user?.nickname || user?.username || '用户头像'}
                           onError={(e) => {
-                            e.target.style.display = 'none';
+                            console.error('Header头像加载失败:', user.avatar_url || user.avatar);
+                            console.error('处理后的URL:', processAvatarUrl(user.avatar_url || user.avatar));
+                            setAvatarError(true);
                           }}
+                          onLoad={() => {
+                            console.log('Header头像加载成功:', processAvatarUrl(user.avatar_url || user.avatar));
+                          }}
+                          crossOrigin="anonymous"
                         />
                       ) : (
                         <span>

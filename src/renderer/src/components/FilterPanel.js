@@ -1,10 +1,8 @@
 // components/FilterPanel.js
 import React, { useState, useEffect } from 'react';
-import { useDispatch, useSelector } from 'react-redux';
-import { filterVideoList } from '../store/videoSlice';
+import { useSelector } from 'react-redux';
 
 const FilterPanel = ({ type, onFilterChange, onApplyFilters }) => {
-  const dispatch = useDispatch();
   const { allFilters } = useSelector(state => state.video);
   const [selectedFilters, setSelectedFilters] = useState({});
 

@@ -1,6 +1,6 @@
 // pages/VideoList.js
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, useNavigate } from 'react-router-dom';
 import { useSelector, useDispatch } from 'react-redux';
 import { 
   fetchMovies, 
@@ -19,6 +19,7 @@ import StarRating from '../components/StarRating';
 const VideoList = () => {
   const { category } = useParams();
   const dispatch = useDispatch();
+  const navigate = useNavigate();
   const [page, setPage] = useState(1);
   const [activeFilters, setActiveFilters] = useState({});
   const { movies, tvShows, anime, varietyShows, documentaries, filterResults } = useSelector(state => state.video);
@@ -57,18 +58,6 @@ const VideoList = () => {
       total: categoryData.pagination?.total
     });
   }, [category, page, categoryData.data.length, categoryData.pagination, categoryData.loading]);
-  
-  // 获取类别名称
-  const getCategoryName = () => {
-    switch (category) {
-      case 'movies': return '电影';
-      case 'tv': return '电视剧';
-      case 'anime': return '动漫';
-      case 'tvshow': return '综艺';
-      case 'documentary': return '纪录片';
-      default: return '视频';
-    }
-  };
   
   useEffect(() => {
     // 记录当前分类，用于详情页顶部高亮
@@ -328,6 +317,9 @@ const VideoList = () => {
                 // 在新窗口打开视频详情页
                 if (window.electronAPI && window.electronAPI.openVideoWindow) {
                   window.electronAPI.openVideoWindow(video.id, video);
+                } else {
+                  // 降级处理：如果没有 Electron API，使用 navigate（开发环境可能用到）
+                  navigate(`/video/${video.id}`, { state: { video } });
                 }
               }}
               className="video-card-link"
@@ -347,8 +339,7 @@ const VideoList = () => {
                 <div className="video-card-meta">
                   {video.release_date && (
                     <div className="video-release-date">
-                      <span className="meta-label">上映:</span>
-                      <span className="meta-value">{video.release_date}</span>
+                      <span className="meta-label">首映:</span> <span className="meta-value">{video.release_date}</span>
                   </div>
                 )}
                 </div>

@@ -1,6 +1,6 @@
 // pages/Search.js
 import React, { useState, useEffect } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useSearchParams, useNavigate } from 'react-router-dom';
 import { useSelector, useDispatch } from 'react-redux';
 import { searchVideoList, clearSearchResults } from '../store/videoSlice';
 import VideoImage from '../components/VideoImage';
@@ -9,6 +9,7 @@ import './SearchPage.css';
 
 const Search = () => {
   const [searchParams] = useSearchParams();
+  const navigate = useNavigate();
   const dispatch = useDispatch();
   const { searchResults } = useSelector(state => state.video);
   const [keyword, setKeyword] = useState(searchParams.get('q') || '');
@@ -68,6 +69,9 @@ const Search = () => {
                     // 在新窗口打开视频详情页
                     if (window.electronAPI && window.electronAPI.openVideoWindow) {
                       window.electronAPI.openVideoWindow(video.id, video);
+                    } else {
+                      // 降级处理：如果没有 Electron API，使用 navigate（开发环境可能用到）
+                      navigate(`/video/${video.id}`, { state: { video } });
                     }
                   }}
                   className="video-card-link"
@@ -87,8 +91,7 @@ const Search = () => {
                     <div className="video-card-meta">
                       {video.release_date && (
                         <div className="video-release-date">
-                          <span className="meta-label">上映:</span>
-                          <span className="meta-value">{video.release_date}</span>
+                          <span className="meta-label">首映:</span> <span className="meta-value">{video.release_date}</span>
                         </div>
                       )}
                     </div>
@@ -119,16 +122,16 @@ const Search = () => {
       <div className="search-bar">
         <form onSubmit={handleSearch} className="search-bar-form">
           <span className="search-icon">🔍</span>
-          <input
-            type="text"
-            value={keyword}
-            onChange={(e) => setKeyword(e.target.value)}
+              <input
+                type="text"
+                value={keyword}
+                onChange={(e) => setKeyword(e.target.value)}
             placeholder="搜索电影 / 演员名称"
           />
           {keyword && <button type="button" className="mic-btn" onClick={handleClear}>✖</button>}
         </form>
-      </div>
-
+        </div>
+      
       {/* 结果区域 */}
       {renderResults()}
     </div>

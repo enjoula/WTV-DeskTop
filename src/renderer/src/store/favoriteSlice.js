@@ -18,10 +18,14 @@ export const fetchFavorites = createAsyncThunk(
 // 异步action - 切换收藏状态
 export const toggleVideoFavorite = createAsyncThunk(
   'favorite/toggleVideoFavorite',
-  async (videoId, { rejectWithValue }) => {
+  async (videoData, { rejectWithValue }) => {
+    // 兼容处理：支持传递 ID 字符串或完整的视频对象
+    const videoId = typeof videoData === 'object' ? videoData.id : videoData;
+    const fullVideo = typeof videoData === 'object' ? videoData : null;
+    
     try {
       const response = await toggleFavorite(videoId);
-      return { videoId, ...response.data };
+      return { videoId, fullVideo, ...response.data };
     } catch (error) {
       return rejectWithValue(error.response.data);
     }
@@ -90,19 +94,22 @@ const favoriteSlice = createSlice({
       })
       .addCase(toggleVideoFavorite.fulfilled, (state, action) => {
         const videoId = action.payload.videoId;
+        const fullVideo = action.payload.fullVideo;
         delete state.toggling[videoId];
         
         // 更新收藏列表
         if (action.payload.data.is_favorite) {
           // 如果已收藏，添加到列表中（如果不存在）
-          const exists = state.favorites.data.some(video => video.id === videoId);
-          if (!exists) {
-            // 这里我们需要完整的视频对象，但在实际应用中可能需要从其他地方获取
-            // 或者重新获取整个列表
+          const exists = state.favorites.data.some(video => String(video.id) === String(videoId));
+          if (!exists && fullVideo) {
+            // 如果提供了完整的视频对象，则添加
+            state.favorites.data = [fullVideo, ...state.favorites.data];
+            state.favorites.pagination.total += 1;
           }
         } else {
           // 如果取消收藏，从列表中移除
-          state.favorites.data = state.favorites.data.filter(video => video.id !== videoId);
+          state.favorites.data = state.favorites.data.filter(video => String(video.id) !== String(videoId));
+          state.favorites.pagination.total = Math.max(0, state.favorites.pagination.total - 1);
         }
       })
       .addCase(toggleVideoFavorite.rejected, (state, action) => {

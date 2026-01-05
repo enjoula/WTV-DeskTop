@@ -11,7 +11,7 @@ import { getDevicePlatformAsync } from './utils/platform';
 import './App.css';
 
 function App() {
-  const [version, setVersion] = React.useState('未知版本');
+  const [version, setVersion] = React.useState(null);
   const [versionCode, setVersionCode] = React.useState(null);
   const [platform, setPlatform] = React.useState(null);
   const [updateInfo, setUpdateInfo] = React.useState(null);
@@ -333,7 +333,12 @@ function App() {
 
   return (
     <Provider store={store}>
-      <Router>
+      <Router
+        future={{
+          v7_startTransition: true,
+          v7_relativeSplatPath: true
+        }}
+      >
         <div className="App">
           {/* 如果是强制更新，完全隐藏应用内容，阻止使用 */}
           {!isForceUpdate && <Routes />}
