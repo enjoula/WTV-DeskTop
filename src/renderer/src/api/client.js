@@ -191,8 +191,43 @@ apiClient.interceptors.response.use(
       statusText: error.response?.statusText,
       url: error.config?.url,
       baseURL: error.config?.baseURL,
-      data: error.response?.data
+      data: error.response?.data,
+      code: error.code, // 网络错误代码（如 ECONNREFUSED, ENOTFOUND 等）
+      errno: error.errno,
+      syscall: error.syscall
     });
+    
+    // 处理网络错误（Windows 平台常见问题）
+    if (!error.response) {
+      // 没有响应，可能是网络连接问题
+      const errorMessage = error.message || '网络错误';
+      const isNetworkError = error.code === 'ECONNREFUSED' || 
+                           error.code === 'ENOTFOUND' || 
+                           error.code === 'ETIMEDOUT' ||
+                           error.code === 'ERR_NETWORK' ||
+                           error.message?.includes('Network Error') ||
+                           error.message?.includes('网络错误');
+      
+      if (isNetworkError) {
+        console.error('网络连接错误，可能的原因：');
+        console.error('1. 服务器地址无法访问:', error.config?.baseURL);
+        console.error('2. 防火墙或网络限制');
+        console.error('3. 服务器未运行或端口被占用');
+        console.error('错误详情:', {
+          code: error.code,
+          message: error.message,
+          syscall: error.syscall,
+          errno: error.errno
+        });
+        
+        // 返回一个更友好的错误信息
+        return Promise.reject({
+          message: '网络连接失败，请检查网络设置或联系管理员',
+          code: error.code || 'NETWORK_ERROR',
+          originalError: error
+        });
+      }
+    }
     
     if (error.response?.status === 401) {
       handleUnauthorized();

@@ -84,7 +84,6 @@
       "warningsAsErrors": false,
       "packElevateHelper": false,
       "differentialPackage": false,
-      "include": "build/installer.nsh",
       "allowElevation": true,
       "perMachine": false
     }

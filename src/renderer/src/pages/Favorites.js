@@ -1,5 +1,5 @@
 // pages/Favorites.js
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { Link, useNavigate } from 'react-router-dom';
 import { fetchFavorites } from '../store/favoriteSlice';
@@ -14,20 +14,71 @@ const Favorites = () => {
   const navigate = useNavigate();
   const { favorites } = useSelector(state => state.favorite);
   const [page, setPage] = useState(1);
+  const loadingRef = useRef(false); // 防止重复加载
+  const observerTarget = useRef(null); // Intersection Observer 的目标元素
 
   useEffect(() => {
     // 获取收藏列表
-    dispatch(fetchFavorites({ page, size: 20 })); // API文档使用 size 而不是 page_size
-  }, [dispatch, page]);
+    dispatch(fetchFavorites({ page: 1, size: 20 })); // 初始加载第一页
+    setPage(1);
+  }, [dispatch]);
 
-  const handleLoadMore = () => {
-    const nextPage = page + 1;
-    // 直接 dispatch，不更新 page state，避免触发 useEffect
-    dispatch(fetchFavorites({ page: nextPage, size: 20 })).then(() => {
-      // 请求成功后再更新 page state
-    setPage(nextPage);
+  // 懒加载：加载更多数据
+  const loadMore = useCallback(() => {
+    // 防止重复加载
+    if (loadingRef.current || favorites.loading) {
+      return;
+    }
+
+    const pagination = favorites.pagination || {};
+    const hasNext = pagination.has_next !== undefined ? pagination.has_next : 
+                   (pagination.total > 0 ? favorites.data.length < pagination.total : true);
+    
+    // 如果没有下一页，不加载
+    if (!hasNext) {
+      return;
+    }
+
+    console.log('收藏列表懒加载触发，加载更多数据');
+    loadingRef.current = true;
+
+    const nextPage = (pagination.page || 1) + 1;
+    console.log('加载收藏列表的下一页:', nextPage);
+    
+    dispatch(fetchFavorites({ page: nextPage, size: 20 })).finally(() => {
+      loadingRef.current = false;
     });
-  };
+  }, [favorites, dispatch]);
+
+  // 懒加载：使用 Intersection Observer 监听滚动到底部
+  useEffect(() => {
+    const pagination = favorites.pagination || {};
+    const hasNext = pagination.has_next !== undefined ? pagination.has_next : 
+                   (pagination.total > 0 ? favorites.data.length < pagination.total : true);
+    
+    // 如果没有下一页或正在加载，不设置观察器
+    const targetElement = observerTarget.current;
+    if (!hasNext || favorites.loading || !targetElement) {
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0].isIntersecting) {
+          loadMore();
+        }
+      },
+      { threshold: 0.1 }
+    );
+
+    observer.observe(targetElement);
+
+    return () => {
+      if (targetElement) {
+        observer.unobserve(targetElement);
+      }
+    };
+  }, [favorites.pagination, favorites.loading, favorites.data.length, loadMore]);
 
   const handleToggleFavorite = async (videoId, event) => {
     if (event) {
@@ -179,20 +230,43 @@ const Favorites = () => {
                 ))}
               </div>
               
-              {favorites.loading && favorites.data.length > 0 && (
-                <div className="loading">加载中...</div>
-              )}
-              
-              {!favorites.loading && favorites.pagination && favorites.pagination.has_next && (
-                <div className="load-more-container">
-                  <button 
-                    className="load-more-button"
-                    onClick={handleLoadMore} 
-                    disabled={favorites.loading}
-                  >
-                    {favorites.loading ? '加载中...' : '加载更多'}
-                  </button>
-                </div>
+              {/* 懒加载指示器 */}
+              {favorites.data.length > 0 && (
+                <>
+                  {/* 加载中的提示 */}
+                  {favorites.loading && (
+                    <div className="loading" style={{ padding: '20px', textAlign: 'center' }}>
+                      加载中...
+                    </div>
+                  )}
+                  
+                  {/* Intersection Observer 目标元素 */}
+                  {(() => {
+                    const pagination = favorites.pagination || {};
+                    const hasNext = pagination.has_next !== undefined ? pagination.has_next : 
+                                   (pagination.total > 0 ? favorites.data.length < pagination.total : true);
+                    
+                    if (!hasNext) {
+                      return (
+                        <div style={{ padding: '20px', textAlign: 'center', color: '#999' }}>
+                          已加载全部
+                        </div>
+                      );
+                    }
+                    
+                    // 返回一个不可见的观察目标元素
+                    return (
+                      <div 
+                        ref={observerTarget}
+                        style={{ 
+                          height: '20px', 
+                          width: '100%',
+                          visibility: 'hidden'
+                        }}
+                      />
+                    );
+                  })()}
+                </>
               )}
             </div>
           )}

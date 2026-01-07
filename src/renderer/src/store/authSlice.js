@@ -136,7 +136,8 @@ const authSlice = createSlice({
       })
       .addCase(fetchCurrentUser.rejected, (state, action) => {
         state.loading = false;
-        state.error = action.payload?.message || '获取用户信息失败';
+        // 不向 UI 暴露“获取用户信息失败”这类错误，避免超过 3 台登录时提示影响登录页体验
+        state.error = null;
         state.isAuthenticated = false;
         state.token = null;
         state.user = null;

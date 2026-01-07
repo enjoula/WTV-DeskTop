@@ -76,6 +76,13 @@ const createWindow = () => {
     // 如果是获取图片的请求，或者到后端服务器的请求，添加指定的 Cookie
     const isImageRequest = /\.(png|jpg|jpeg|gif|webp|svg|ico)(\?.*)?$/i.test(details.url);
     const isBackendRequest = details.url.includes('124.222.196.128');
+    
+    // Windows 平台：确保 User-Agent 正确设置，避免某些服务器拒绝请求
+    if (process.platform === 'win32') {
+      if (!requestHeaders['User-Agent']) {
+        requestHeaders['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+      }
+    }
     // 修改识别逻辑：只要是 pngsucai.com 的图片请求，都视为需要注入 Cookie 的头像/素材请求
     const isPngsucaiRequest = details.url.includes('pngsucai.com');
     

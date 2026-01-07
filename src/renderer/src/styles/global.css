@@ -29,16 +29,24 @@ body {
 .video-detail-player-section {
   position: -webkit-sticky;
   position: sticky;
-  top: 70px; /* 改为 70px，避免被固定定位的 header (70px) 遮挡 */
+  top: 10; /* 紧贴顶部，header 会覆盖在上方 */
   width: 100%;
   background: #000;
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
   z-index: 100;
   overflow: visible;
   border-radius: 0;
+  /* 限制播放器区域的最大高度 */
+  max-height: 70vh; /* 最大高度为视口高度的70% */
   transition: opacity 1.2s cubic-bezier(0.25, 1, 0.5, 1), 
               margin 1.2s cubic-bezier(0.25, 1, 0.5, 1), 
               padding 1.2s cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+/* 播放时，限制播放器区域的高度 */
+.video-detail-player-section.player-expanded {
+  max-height: 70vh;
+  height: auto;
 }
 
 /* 即使不展开，也要让内容撑开高度，确保下方的推荐列表被顶开 */
@@ -1797,11 +1805,15 @@ button:disabled {
   left: 0;
   width: 100%;
   height: 100%;
+  max-height: 70vh; /* 限制最大高度为视口高度的70% */
   z-index: 10; /* 确保播放器在最顶层 */
   background-color: #000;
   display: flex;
   align-items: center;
   justify-content: center;
+  overflow: hidden; /* 确保内容不会溢出 */
+  /* 确保容器能够适应16:9比例的播放器 */
+  min-height: 0;
 }
 
 .video-player-container-inline {
@@ -1809,7 +1821,12 @@ button:disabled {
   width: 100%;
   max-width: 1200px;
   margin: 0 auto;
-  height: 100%;
+  /* 使用 aspect-ratio 保持16:9比例 */
+  aspect-ratio: 16 / 9;
+  /* 限制最大高度为视口高度的70%，但保持16:9比例 */
+  max-height: 70vh;
+  /* 当达到最大高度时，宽度会相应调整以保持比例 */
+  height: auto;
   background-color: #000;
   box-sizing: border-box;
 }
@@ -4054,6 +4071,7 @@ button:disabled {
   margin: 0 auto;
 }
 
+
 .play-history-page .page-header {
   display: flex;
   justify-content: space-between;
@@ -4064,7 +4082,8 @@ button:disabled {
 .play-history-page .page-header h1 {
   margin: 0;
   font-size: 28px;
-  color: #1a1a1a;
+  color: #ffffff;
+  font-weight: 600;
 }
 
 .clear-all-btn {
@@ -4264,16 +4283,17 @@ button:disabled {
   align-items: center;
   margin-bottom: 30px;
   padding-bottom: 15px;
-  border-bottom: 2px solid #eee;
+  border-bottom: 2px solid rgba(255, 255, 255, 0.1);
 }
 
 .favorites-header h1 {
   margin: 0;
-  color: #333;
+  color: #ffffff;
+  font-weight: 600;
 }
 
 .favorites-stats {
-  color: #666;
+  color: #e6e6e6;
   font-size: 1rem;
 }
 

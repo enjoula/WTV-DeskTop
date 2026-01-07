@@ -1,8 +1,9 @@
 // pages/VideoDetail.js
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { useSelector, useDispatch } from 'react-redux';
 import ReactPlayer from 'react-player';
+import Hls from 'hls.js';
 import { 
   fetchEpisodes, 
   fetchPlayUrl,
@@ -53,6 +54,8 @@ const VideoDetail = () => {
   const [playerReady, setPlayerReady] = useState(false); // 播放器是否准备好
   const [showFullDescription, setShowFullDescription] = useState(false); // 简介展开状态
   const [isDescriptionOverflow, setIsDescriptionOverflow] = useState(false); // 简介是否超过3行
+  const [videoLoadError, setVideoLoadError] = useState(null); // 视频加载错误
+  const [videoLoadTimeout, setVideoLoadTimeout] = useState(false); // 视频加载超时
   const isSeekingRef = useRef(false); // 是否正在拖动播放进度
   const playerRef = useRef(null);
   const reactPlayerRef = useRef(null); // ReactPlayer 的 ref
@@ -63,6 +66,10 @@ const VideoDetail = () => {
   const lastSavedProgressRef = useRef(0); // 上次保存的进度（秒）
   const lastSavedTimeRef = useRef(0); // 上次保存的时间戳（毫秒）
   const justSwitchedEpisodeRef = useRef(false); // 是否刚刚切换了集数（用于避免拖动后循环暂停播放）
+  const videoLoadTimeoutRef = useRef(null); // 视频加载超时定时器
+  const errorRetryRef = useRef(0); // 错误重试次数
+  const formatErrorRetryTimerRef = useRef(null); // 格式错误重试定时器
+  const resumeTimeRef = useRef(null); // 续播时间（秒），在播放器准备好后设置
 
   // 规范化视频信息，确保 cover_url 和 pic 字段一致
   // 规范化视频数据，确保封面图字段一致
@@ -147,7 +154,13 @@ const VideoDetail = () => {
     let playHistory = location.state?.playHistory;
     const basicVideo = location.state?.video;
     
-    // 如果没有通过 state 传递 playHistory，尝试从 localStorage 中读取
+    // 如果没有通过 state 传递 playHistory，尝试从 Electron API 获取的 videoData 中读取
+    if (!playHistory && basicVideo?.playHistory) {
+      playHistory = basicVideo.playHistory;
+      console.log('从 videoData 中获取播放记录:', playHistory);
+    }
+    
+    // 如果还是没有，尝试从 localStorage 中读取
     if (!playHistory && id) {
       try {
         const storedHistory = getVideoPlayHistory(id);
@@ -278,6 +291,12 @@ const VideoDetail = () => {
           if (data) {
             console.log('从 Electron API 读取视频数据:', data);
             electronData = data;
+            
+            // 如果 Electron API 数据中包含 playHistory，更新 playHistory 变量
+            if (data.playHistory && !playHistory) {
+              playHistory = data.playHistory;
+              console.log('从 Electron API 数据中获取播放记录:', playHistory);
+            }
           } else {
             console.log('从 Electron API 读取的数据为空，使用之前找到的视频信息或 Redux store 中的数据');
             // 如果 Electron API 数据为空，使用之前找到的 foundVideo（已经在外部计算好了）
@@ -383,6 +402,17 @@ const VideoDetail = () => {
       dispatch(fetchFavorites({ page: 1, size: 100 }));
     }
   }, [isAuthenticated, favorites?.data, favorites?.loading, dispatch]);
+
+  // 监听登录状态变化，登录成功后刷新数据
+  useEffect(() => {
+    if (isAuthenticated && id) {
+      console.log('用户已登录，刷新视频详情页数据');
+      // 重新获取剧集和推荐信息
+      dispatch(fetchEpisodes(id));
+      // 重新获取收藏列表
+      dispatch(fetchFavorites({ page: 1, size: 100 }));
+    }
+  }, [isAuthenticated, id, dispatch]);
 
   // 根据收藏列表实时更新当前视频的红心状态
   useEffect(() => {
@@ -564,37 +594,24 @@ const VideoDetail = () => {
     }
   }, [selectedEpisode, episodes.data, activeSeason]);
 
-  // 当播放地址准备好且正在播放时，确保自动播放
-  // 注意：这里刻意不依赖 isPlaying（否则用户手动暂停会被重新置为播放）
+  // 当播放地址准备好且正在播放时，等待播放器初始化
+  // 注意：这里不立即设置 isPlaying，等待 onReady 回调中视频元素真正准备好后再设置
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     if ((isMoviePlaying || isEpisodePlaying) && playUrl.url && !playUrl.loading && !playUrl.error) {
       console.log('播放地址已准备好，等待播放器初始化...');
-      // 确保播放状态为 true
-      setIsPlaying(true);
+      // 不立即设置 isPlaying，等待 onReady 回调中视频元素真正准备好后再设置
+      // 这样可以避免在视频元素还没准备好时就尝试播放，导致格式错误
       
       // 延迟一点时间，确保 ReactPlayer 已经渲染
       const timer1 = setTimeout(() => {
         console.log('检查播放器状态，isPlaying:', isPlaying, 'playerReady:', playerReady);
         if (!playerReady) {
           console.log('播放器还未准备好，等待 onReady 回调');
-          // 即使播放器还没准备好，也尝试直接操作 video 元素
-          // 只有在不是拖动状态时才自动播放
-          if (playerRef.current?.wrapper && !isSeekingRef.current) {
-            const videoElement = playerRef.current.wrapper.querySelector('video');
-            if (videoElement && videoElement.paused) {
-              console.log('找到 video 元素，尝试直接播放');
-              videoElement.play().then(() => {
-                console.log('直接播放成功');
-                setIsPlaying(true);
-              }).catch((err) => {
-                console.error('直接播放失败:', err);
-              });
-            }
-          }
+          // 不在这里尝试播放，等待 onReady 回调处理
         } else {
-          console.log('播放器已准备好，确保播放状态为 true');
-          setIsPlaying(true);
+          console.log('播放器已准备好，等待 onReady 回调设置播放状态');
+          // 不在这里设置 isPlaying，等待 onReady 回调中视频元素真正准备好后再设置
         }
       }, 500);
       
@@ -628,19 +645,80 @@ const VideoDetail = () => {
             
             // 检查 HLS 实例
             const hlsInstance = videoElement.hls;
+            const isM3u8 = playUrl.url?.toLowerCase().endsWith('.m3u8') || 
+                         playUrl.url?.toLowerCase().includes('m3u8');
             console.log('HLS 实例检查:', {
               hasHls: !!hlsInstance,
               url: playUrl.url,
-              isM3u8: playUrl.url?.endsWith('.m3u8')
+              isM3u8: isM3u8,
+              hlsSupported: Hls.isSupported()
             });
             
+            // 如果是 HLS 视频但没有 HLS 实例，尝试手动创建
+            if (isM3u8 && !hlsInstance && Hls.isSupported()) {
+              console.log('检测到 HLS 视频但缺少 HLS 实例，尝试手动创建...');
+              try {
+                const hls = new Hls({
+                  enableWorker: true,
+                  lowLatencyMode: true,
+                  backBufferLength: 90,
+                  maxBufferLength: 30,
+                  maxMaxBufferLength: 60,
+                  startLevel: -1, // 自动选择最佳质量
+                  debug: false
+                });
+                
+                hls.loadSource(playUrl.url);
+                hls.attachMedia(videoElement);
+                
+                hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                  console.log('HLS manifest 解析完成，可以播放');
+                  if (videoElement.paused && !isSeekingRef.current && document.contains(videoElement)) {
+                    videoElement.play().catch(err => {
+                      if (err.name === 'AbortError' && err.message?.includes('removed from the document')) {
+                        console.warn('播放请求被中断（媒体元素可能被移除）:', err.message);
+                      } else {
+                        console.error('HLS 播放失败:', err);
+                      }
+                    });
+                  }
+                });
+                
+                hls.on(Hls.Events.ERROR, (event, data) => {
+                  console.error('HLS 错误:', data);
+                  if (data.fatal) {
+                    switch (data.type) {
+                      case Hls.ErrorTypes.NETWORK_ERROR:
+                        console.error('HLS 网络错误，尝试恢复...');
+                        hls.startLoad();
+                        break;
+                      case Hls.ErrorTypes.MEDIA_ERROR:
+                        console.error('HLS 媒体错误，尝试恢复...');
+                        hls.recoverMediaError();
+                        break;
+                      default:
+                        console.error('HLS 致命错误，无法恢复');
+                        hls.destroy();
+                        break;
+                    }
+                  }
+                });
+                
+                // 将 HLS 实例保存到 video 元素
+                videoElement.hls = hls;
+                console.log('HLS 实例创建成功');
+              } catch (error) {
+                console.error('创建 HLS 实例失败:', error);
+              }
+            }
+            
             // 如果是 HLS 视频但 readyState 为 0，仅监听加载事件，避免重复实例
-            if (playUrl.url?.endsWith('.m3u8') && videoElement.readyState === 0) {
+            if (isM3u8 && videoElement.readyState === 0) {
               console.log('HLS 视频还未加载，等待加载事件触发...');
               
               const onLoadedMetadata = () => {
                 console.log('video 元数据已加载，readyState:', videoElement.readyState);
-                if (videoElement.paused && !isSeekingRef.current) {
+                if (videoElement.paused && !isSeekingRef.current && document.contains(videoElement)) {
                   videoElement.play().then(() => {
                     console.log('元数据加载后播放成功');
                     setIsPlaying(true);
@@ -648,7 +726,12 @@ const VideoDetail = () => {
                       videoElement.muted = false;
                     }
                   }).catch((err) => {
+                    // 忽略"媒体被移除"的错误
+                    if (err.name === 'AbortError' && err.message?.includes('removed from the document')) {
+                      console.warn('播放请求被中断（媒体元素可能被移除）:', err.message);
+                    } else {
                     console.error('元数据加载后播放失败:', err);
+                    }
                   });
                 }
                 videoElement.removeEventListener('loadedmetadata', onLoadedMetadata);
@@ -656,7 +739,7 @@ const VideoDetail = () => {
               };
               const onCanPlay = () => {
                 console.log('video 可以播放，readyState:', videoElement.readyState);
-                if (videoElement.paused && !isSeekingRef.current) {
+                if (videoElement.paused && !isSeekingRef.current && document.contains(videoElement)) {
                   videoElement.play().then(() => {
                     console.log('canplay 事件后播放成功');
                     setIsPlaying(true);
@@ -664,7 +747,12 @@ const VideoDetail = () => {
                       videoElement.muted = false;
                     }
                   }).catch((err) => {
+                    // 忽略"媒体被移除"的错误
+                    if (err.name === 'AbortError' && err.message?.includes('removed from the document')) {
+                      console.warn('播放请求被中断（媒体元素可能被移除）:', err.message);
+                    } else {
                     console.error('canplay 事件后播放失败:', err);
+                    }
                   });
                 }
                 videoElement.removeEventListener('loadedmetadata', onLoadedMetadata);
@@ -673,8 +761,8 @@ const VideoDetail = () => {
               videoElement.addEventListener('loadedmetadata', onLoadedMetadata);
               videoElement.addEventListener('canplay', onCanPlay);
               return;
-            } else if (videoElement.paused && !isSeekingRef.current) {
-              // 只有在不是拖动状态时才自动播放
+            } else if (videoElement.paused && !isSeekingRef.current && document.contains(videoElement)) {
+              // 只有在不是拖动状态时才自动播放，且元素仍在 DOM 中
               console.log('延迟找到 video 元素，尝试播放');
               videoElement.play().then(() => {
                 console.log('延迟播放成功');
@@ -685,17 +773,27 @@ const VideoDetail = () => {
                   videoElement.muted = false;
                 }
               }).catch((err) => {
+                // 忽略"媒体被移除"的错误
+                if (err.name === 'AbortError' && err.message?.includes('removed from the document')) {
+                  console.warn('播放请求被中断（媒体元素可能被移除）:', err.message);
+                  return;
+                }
                 console.error('延迟播放失败:', err);
                 console.error('错误详情:', err.message, err.name);
-                // 如果播放失败，尝试静音播放
-                if (!videoElement.muted) {
+                // 如果播放失败且元素仍在 DOM 中，尝试静音播放
+                if (!videoElement.muted && document.contains(videoElement)) {
                   console.log('尝试静音播放');
                   videoElement.muted = true;
                   videoElement.play().then(() => {
                     console.log('静音播放成功');
                     setIsPlaying(true);
                   }).catch((err2) => {
+                    // 忽略"媒体被移除"的错误
+                    if (err2.name === 'AbortError' && err2.message?.includes('removed from the document')) {
+                      console.warn('静音播放请求被中断（媒体元素可能被移除）:', err2.message);
+                    } else {
                     console.error('静音播放也失败:', err2);
+                    }
                   });
                 }
               });
@@ -827,47 +925,46 @@ const VideoDetail = () => {
     dispatch(fetchEpisodes(id));
   }, [id, dispatch]);
 
-  // 从播放记录跳转时，自动选择对应的集数并开始播放
+  // 当播放URL变化时，重置错误状态
   useEffect(() => {
-    const playHistory = location.state?.playHistory;
-    
-    // 如果已经处理过，或者没有播放记录，直接返回
-    if (!playHistory || !videoInfo || hasAutoPlayFromHistoryRef.current) {
-      return;
+    if (playUrl.url) {
+      setVideoLoadError(null);
+      setVideoLoadTimeout(false);
+      errorRetryRef.current = 0; // 重置错误重试计数
+      // 清除格式错误重试定时器
+      if (formatErrorRetryTimerRef.current) {
+        clearTimeout(formatErrorRetryTimerRef.current);
+        formatErrorRetryTimerRef.current = null;
+      }
     }
-    
-    // 判断是否为剧集类型
-    const isEpisodeType = ['tv', 'anime', 'tvshow', 'documentary', 'doc'].includes(
-      playHistory.videoType || videoInfo.type
-    );
-    
-    if (isEpisodeType && playHistory.episode !== null && playHistory.episode !== undefined) {
-      // 等待episodes数据加载
-      if (episodes.data && episodes.data.length > 0) {
-        // 检查该集数是否存在
-        const episodeExists = episodes.data.some(ep => {
-          const episodeNumber = ep.episode_number || ep.id;
-          return episodeNumber === playHistory.episode;
-        });
-        
-        if (episodeExists && !selectedEpisode && !isEpisodePlaying) {
-          console.log('从播放记录自动选择集数:', playHistory.episode);
-          hasAutoPlayFromHistoryRef.current = true;
-          // 延迟一点时间，确保组件已完全渲染
-          setTimeout(() => {
-            handlePlay(playHistory.episode);
-          }, 300);
-          }
+  }, [playUrl.url]);
+
+  // 组件卸载时清理超时定时器和事件监听器
+  useEffect(() => {
+    return () => {
+      if (videoLoadTimeoutRef.current) {
+        clearTimeout(videoLoadTimeoutRef.current);
+        videoLoadTimeoutRef.current = null;
+      }
+      
+      // 清理视频元素的事件监听器
+      try {
+        const videoElement = reactPlayerRef.current?.getInternalPlayer?.('video') || 
+                           (playerRef.current?.wrapper?.querySelector?.('video'));
+        if (videoElement && videoElement._eventListeners) {
+          videoElement._eventListeners.forEach(({ type, handler }) => {
+            videoElement.removeEventListener(type, handler);
+          });
+          videoElement._eventListeners = [];
         }
-    } else if (!isEpisodeType && playHistory.episode === null && !isMoviePlaying) {
-      // 电影类型，自动开始播放
-      console.log('从播放记录自动播放电影');
-      hasAutoPlayFromHistoryRef.current = true;
-      setTimeout(() => {
-        handleMoviePlay();
-      }, 300);
-    }
-  }, [location.state, videoInfo, episodes.data, selectedEpisode, isMoviePlaying, isEpisodePlaying]);
+      } catch (err) {
+        console.error('清理视频元素事件监听器失败:', err);
+      }
+    };
+  }, []);
+
+  // 注意：executeAutoPlayFromHistory 函数已移到 handleMoviePlay 之后，以避免变量初始化顺序问题
+  // 使用 executeAutoPlayFromHistory 的 useEffect 也移到该函数定义之后
 
   const handlePlay = (episodeNumber) => {
     console.log('handlePlay called with episodeNumber:', episodeNumber);
@@ -879,15 +976,28 @@ const VideoDetail = () => {
     // 切换集数前，清空旧的播放地址
     dispatch(clearPlayUrl());
     
-    // 设置播放状态
+    // 重置错误状态
+    setVideoLoadError(null);
+    setVideoLoadTimeout(false);
+    errorRetryRef.current = 0; // 重置错误重试计数
+    if (formatErrorRetryTimerRef.current) {
+      clearTimeout(formatErrorRetryTimerRef.current);
+      formatErrorRetryTimerRef.current = null;
+    }
+    
+    // 设置播放状态（但不立即设置 isPlaying，等待播放器准备好）
     setIsEpisodePlaying(true);
     setIsMoviePlaying(false);
     setPlayerReady(false);
-    setIsPlaying(true);
+    // 不立即设置 isPlaying，等待 onReady 回调中视频元素真正准备好后再设置
+    setIsPlaying(false);
     
     // 重置进度保存跟踪
     lastSavedProgressRef.current = 0;
     lastSavedTimeRef.current = 0;
+    
+    // 清除续播时间（因为这是从头播放）
+    resumeTimeRef.current = null;
     
     justSwitchedEpisodeRef.current = true;
     setTimeout(() => {
@@ -925,20 +1035,7 @@ const VideoDetail = () => {
       console.log('fetchPlayUrl result:', result);
       if (result.meta.requestStatus === 'fulfilled') {
         console.log('Play URL fetched successfully');
-        // 检查是否有播放记录需要续播
-        const playHistory = location.state?.playHistory;
-        if (playHistory && playHistory.episode === episodeNumber && playHistory.progress > 0) {
-          // 延迟设置播放时间，等待播放器准备好
-          setTimeout(() => {
-            if (playerRef.current?.wrapper) {
-              const videoElement = playerRef.current.wrapper.querySelector('video');
-              if (videoElement) {
-                videoElement.currentTime = playHistory.progress;
-                console.log('续播到:', playHistory.progress);
-              }
-            }
-          }, 2000);
-        }
+        // 注意：续播逻辑已在 handlePlayFromTime 中处理，这里不再重复处理
         // 等待 Redux state 更新后再检查（参考电影播放逻辑）
         setTimeout(() => {
           console.log('检查 playUrl state 更新...');
@@ -1049,10 +1146,15 @@ const VideoDetail = () => {
     console.log('handlePlayFromTime called with episodeNumber:', episodeNumber, 'startTime:', startTime);
     setSelectedEpisode(episodeNumber);
     
+    // 存储续播时间，等待播放器准备好后设置
+    resumeTimeRef.current = startTime;
+    console.log('✅ 设置续播时间到 ref:', startTime);
+    
     // 设置播放状态，参考 handlePlay 逻辑
     setIsEpisodePlaying(true);
     setPlayerReady(false); // 重置播放器准备状态
-    setIsPlaying(true); // 设置播放状态，准备自动播放
+    // 不立即设置 isPlaying，等待 onReady 回调中视频元素真正准备好后再设置
+    setIsPlaying(false);
     
     // 重置进度保存跟踪
     lastSavedProgressRef.current = 0;
@@ -1076,79 +1178,17 @@ const VideoDetail = () => {
     dispatch(fetchPlayUrl(playParams)).then((result) => {
       console.log('fetchPlayUrl result for continue watching:', result);
       if (result.meta.requestStatus === 'fulfilled') {
-        console.log('Play URL fetched successfully for continue watching');
-        // 设置起始播放时间，需要等待播放器准备好
-        // 使用多次尝试，确保能够设置成功
-        const setStartTime = (attempts = 0) => {
-          if (attempts > 10) {
-            console.warn('设置续播时间失败，已尝试10次');
-            return;
-          }
-          
-          if (reactPlayerRef.current) {
-            try {
-              const videoElement = reactPlayerRef.current.getInternalPlayer?.('video') || 
-                                 (reactPlayerRef.current.wrapper?.querySelector?.('video'));
-              if (videoElement) {
-                // 检查视频是否已加载元数据
-                if (videoElement.readyState >= 1) {
-                  // 视频元数据已加载，可以设置时间
-                  videoElement.currentTime = startTime;
-                  console.log('续播时间设置成功:', startTime);
-                  // 确保视频正在播放
-                  if (videoElement.paused) {
-                    videoElement.play().then(() => {
-                      console.log('续播自动播放成功');
-                      setIsPlaying(true);
-                    }).catch(err => {
-                      console.error('续播自动播放失败:', err);
-                    });
-                  }
-                } else {
-                  // 视频元数据未加载，等待加载完成
-                  const onLoadedMetadata = () => {
-                    videoElement.currentTime = startTime;
-                    console.log('续播时间设置成功（元数据加载后）:', startTime);
-                    // 确保视频正在播放
-                    if (videoElement.paused) {
-                      videoElement.play().then(() => {
-                        console.log('续播自动播放成功（元数据加载后）');
-                        setIsPlaying(true);
-                      }).catch(err => {
-                        console.error('续播自动播放失败:', err);
-                      });
-                    }
-                    videoElement.removeEventListener('loadedmetadata', onLoadedMetadata);
-                  };
-                  videoElement.addEventListener('loadedmetadata', onLoadedMetadata);
-                  // 如果等待时间过长，再次尝试
-                  setTimeout(() => setStartTime(attempts + 1), 1000);
-                }
-              } else {
-                // 视频元素不存在，延迟重试
-                setTimeout(() => setStartTime(attempts + 1), 500);
-              }
-            } catch (error) {
-              console.error('设置续播时间时出错:', error);
-              setTimeout(() => setStartTime(attempts + 1), 500);
-            }
-          } else {
-            // reactPlayerRef 不存在，延迟重试
-            setTimeout(() => setStartTime(attempts + 1), 500);
-          }
-        };
-        
-        // 延迟一点时间，等待播放器初始化
-        setTimeout(() => {
-          setStartTime();
-        }, 500);
+        console.log('Play URL fetched successfully for continue watching, 续播时间将在 onReady 中设置');
+        // 续播时间将在 handlePlayerReady 中设置，这里不需要立即设置
       } else {
         console.error('Failed to fetch play URL for continue watching:', result.error);
+        resumeTimeRef.current = null; // 清除续播时间
         setIsEpisodePlaying(false);
         setPlayerReady(false);
       }
     }).catch((error) => {
       console.error('Error in fetchPlayUrl for continue watching:', error);
+      resumeTimeRef.current = null; // 清除续播时间
       setIsEpisodePlaying(false);
       setPlayerReady(false);
     });
@@ -1157,7 +1197,49 @@ const VideoDetail = () => {
   // 处理播放进度变化（当前已移除快进配置逻辑，仅保存进度）
   const handleProgress = (progress) => {
     const { playedSeconds } = progress;
-    setPlayedSeconds(playedSeconds);
+    
+    // 验证 playedSeconds 是否有效
+    if (playedSeconds != null && !isNaN(playedSeconds) && isFinite(playedSeconds) && playedSeconds >= 0) {
+      setPlayedSeconds(Number(playedSeconds));
+    } else {
+      console.warn('⚠️ handleProgress 收到无效的 playedSeconds:', playedSeconds, {
+        type: typeof playedSeconds,
+        isNaN: isNaN(playedSeconds),
+        isFinite: isFinite(playedSeconds),
+        value: playedSeconds
+      });
+      // 如果无效，尝试从视频元素获取
+      try {
+        const videoElement = reactPlayerRef.current?.getInternalPlayer?.('video') || 
+                           (playerRef.current?.wrapper?.querySelector?.('video'));
+        if (videoElement && videoElement.currentTime && 
+            !isNaN(videoElement.currentTime) && isFinite(videoElement.currentTime) && 
+            videoElement.currentTime >= 0) {
+          const elementTime = Number(videoElement.currentTime);
+          console.log('从视频元素获取到播放进度:', elementTime);
+          setPlayedSeconds(elementTime);
+        } else {
+          // 如果都获取不到，保持当前值不变
+          console.warn('无法获取有效的播放进度，保持当前值');
+        }
+      } catch (err) {
+        console.error('从视频元素获取播放进度失败:', err);
+      }
+    }
+    
+    // 如果视频正在播放，清除加载超时定时器（说明视频已经成功加载并开始播放）
+    if (playedSeconds > 0 && videoLoadTimeoutRef.current) {
+      console.log('视频正在播放，清除加载超时定时器');
+      clearTimeout(videoLoadTimeoutRef.current);
+      videoLoadTimeoutRef.current = null;
+      // 清除超时错误状态
+      if (videoLoadTimeout) {
+        setVideoLoadTimeout(false);
+      }
+      if (videoLoadError) {
+        setVideoLoadError(null);
+      }
+    }
     
     // 每30秒保存一次播放进度到 Redux
     if (selectedEpisode && Math.floor(playedSeconds) % 30 === 0) {
@@ -1186,34 +1268,66 @@ const VideoDetail = () => {
       // 使用 state 中的 duration（通过 onDuration 回调获取）
       // 如果 state 中的 duration 为 0，尝试从 ref 获取（作为后备方案）
       let currentDuration = duration;
-      if (currentDuration === 0 && reactPlayerRef.current && reactPlayerRef.current.getDuration) {
-        currentDuration = reactPlayerRef.current.getDuration() || 0;
+      if ((currentDuration === 0 || !currentDuration) && reactPlayerRef.current && reactPlayerRef.current.getDuration) {
+        try {
+          const refDuration = reactPlayerRef.current.getDuration();
+          if (refDuration && refDuration > 0 && !isNaN(refDuration) && isFinite(refDuration)) {
+            currentDuration = Number(refDuration);
+            console.log('从 ReactPlayer ref 获取到时长:', currentDuration);
+            // 同时更新 state，以便下次使用
+            if (currentDuration !== duration) {
+              setDuration(currentDuration);
+            }
+          }
+        } catch (err) {
+          console.warn('从 ReactPlayer ref 获取时长失败:', err);
+        }
       }
       
-      // 更新播放进度（每10秒保存一次，避免频繁写入）
-      // 使用时间戳判断是否应该保存，确保每10秒更新一次
+      // 如果还是 0，尝试从视频元素直接获取
+      if ((currentDuration === 0 || !currentDuration) && reactPlayerRef.current) {
+        try {
+          const videoElement = reactPlayerRef.current.getInternalPlayer?.('video') || 
+                             (playerRef.current?.wrapper?.querySelector?.('video'));
+          if (videoElement && videoElement.duration && 
+              !isNaN(videoElement.duration) && isFinite(videoElement.duration) && 
+              videoElement.duration > 0) {
+            currentDuration = Number(videoElement.duration);
+            console.log('从视频元素获取到时长:', currentDuration);
+            // 同时更新 state，以便下次使用
+            if (currentDuration !== duration) {
+              setDuration(currentDuration);
+            }
+          }
+        } catch (err) {
+          console.warn('从视频元素获取时长失败:', err);
+        }
+      }
+      
+      // 更新播放进度（每5秒保存一次）
+      // 使用时间戳判断是否应该保存，确保每5秒更新一次
       const now = Date.now();
       const timeSinceLastSave = now - lastSavedTimeRef.current;
-      const SAVE_INTERVAL = 10000; // 10秒（毫秒）
+      const SAVE_INTERVAL = 5000; // 5秒（毫秒）
       
-      // 判断是否应该保存：每10秒保存一次，或者首次保存（lastSavedTimeRef.current === 0）
-      // 放宽条件：只要 playedSeconds >= 0 就保存（包括刚开始播放时）
-      // 这样可以确保视频一开始播放就立即创建记录
+      // 判断是否应该保存：每5秒保存一次，或者首次保存（lastSavedTimeRef.current === 0）
+      // 或者进度变化超过1秒（确保重要进度变化被保存）
+      const progressChanged = Math.abs(playedSeconds - lastSavedProgressRef.current) >= 1;
       const shouldSave = (
         timeSinceLastSave >= SAVE_INTERVAL || 
-        lastSavedTimeRef.current === 0
+        lastSavedTimeRef.current === 0 ||
+        progressChanged
       ) && (
         playedSeconds >= 0 // 包括刚开始播放时（progress = 0）也保存
       );
       
-      // 添加调试信息
-      if (!shouldSave) {
-        console.log('⏸️ 跳过保存:', {
-          timeSinceLastSave,
-          SAVE_INTERVAL,
-          lastSavedTimeRef: lastSavedTimeRef.current,
-          playedSeconds,
-          shouldSave
+      // 添加调试信息（仅在需要保存时输出，减少日志）
+      if (shouldSave) {
+        console.log('✅ 准备保存播放记录（5秒更新）:', {
+          timeSinceLastSave: Math.round(timeSinceLastSave / 1000) + '秒',
+          playedSeconds: Math.round(playedSeconds),
+          progressChanged,
+          lastSavedProgress: Math.round(lastSavedProgressRef.current)
         });
       }
       
@@ -1247,7 +1361,7 @@ const VideoDetail = () => {
           }
         }
         
-        console.log('保存播放进度（10秒更新）:', { 
+        console.log('保存播放进度（5秒更新）:', { 
           id, 
           episode, 
           playedSeconds: finalProgressValue, 
@@ -1271,9 +1385,8 @@ const VideoDetail = () => {
           willSave: finalProgressValue >= 0 || existingRecord
         });
         
-        // 只有当进度 > 0 或 时长 > 0 时才保存
-        // 这样可以避免创建/更新空的 (0, 0) 记录，从而消除 playHistory.js 中的警告
-        if (finalProgressValue > 0 || finalDurationValue > 0) {
+        // 无论进度和时长是否为 0，都保存记录
+        // 这样可以确保视频一开始播放就立即创建记录
           // updatePlayProgress 会自动处理：如果存在则更新，不存在则插入
           console.log('📝 调用 updatePlayProgress:', {
             id,
@@ -1294,9 +1407,6 @@ const VideoDetail = () => {
           videoInfo.cover_url || videoInfo.pic || '',
           videoType
         );
-        } else {
-          console.log('⏳ 进度和时长均为 0，暂不保存播放记录');
-        }
         
         // 验证保存是否成功
         setTimeout(() => {
@@ -1438,14 +1548,46 @@ const VideoDetail = () => {
     // 播放前，清空旧的播放地址
     dispatch(clearPlayUrl());
     
+    // 重置错误状态
+    setVideoLoadError(null);
+    setVideoLoadTimeout(false);
+    errorRetryRef.current = 0; // 重置错误重试计数
+    if (formatErrorRetryTimerRef.current) {
+      clearTimeout(formatErrorRetryTimerRef.current);
+      formatErrorRetryTimerRef.current = null;
+    }
+    
     setIsMoviePlaying(true);
     setIsEpisodePlaying(false);
     setPlayerReady(false);
-    setIsPlaying(true);
+    // 不立即设置 isPlaying，等待 onReady 回调中视频元素真正准备好后再设置
+    setIsPlaying(false);
     
     // 重置进度保存跟踪
     lastSavedProgressRef.current = 0;
     lastSavedTimeRef.current = 0;
+    
+    // 检查是否有播放记录需要续播（从 state 或 localStorage 读取）
+    let playHistory = location.state?.playHistory;
+    if (!playHistory && id) {
+      try {
+        const storedHistory = getVideoPlayHistory(id);
+        if (storedHistory && storedHistory.episode === null && storedHistory.progress > 0) {
+          playHistory = storedHistory;
+        }
+      } catch (error) {
+        console.error('从 localStorage 读取播放记录失败:', error);
+      }
+    }
+    
+    // 如果有续播记录，存储续播时间到 ref，等待播放器准备好后设置
+    if (playHistory && playHistory.episode === null && playHistory.progress > 0) {
+      resumeTimeRef.current = playHistory.progress;
+      console.log('✅ 设置电影续播时间到 ref:', playHistory.progress);
+    } else {
+      // 从头播放，清除续播时间
+      resumeTimeRef.current = null;
+    }
     
     // 保存播放记录（逻辑保持不变...）
     const existingRecord = getVideoPlayHistory(videoId);
@@ -1471,83 +1613,6 @@ const VideoDetail = () => {
     dispatch(fetchPlayUrl(playParams)).then((result) => {
       console.log('电影播放地址获取结果:', result);
       console.log('结果payload:', result.payload);
-      
-      // 检查是否有播放记录需要续播（从 state 或 localStorage 读取）
-      let playHistory = location.state?.playHistory;
-      if (!playHistory && id) {
-        try {
-          const storedHistory = getVideoPlayHistory(id);
-          if (storedHistory && storedHistory.episode === null && storedHistory.progress > 0) {
-            playHistory = storedHistory;
-          }
-        } catch (error) {
-          console.error('从 localStorage 读取播放记录失败:', error);
-        }
-      }
-      
-      if (playHistory && playHistory.episode === null && playHistory.progress > 0) {
-        // 延迟设置播放时间，等待播放器准备好
-        // 使用多次尝试，确保能够设置成功
-        const setStartTime = (attempts = 0) => {
-          if (attempts > 10) {
-            console.warn('设置电影续播时间失败，已尝试10次');
-            return;
-          }
-          
-          if (reactPlayerRef.current) {
-            try {
-              const videoElement = reactPlayerRef.current.getInternalPlayer?.('video') || 
-                                 (reactPlayerRef.current.wrapper?.querySelector?.('video'));
-            if (videoElement) {
-                // 检查视频是否已加载元数据
-                if (videoElement.readyState >= 1) {
-                  // 视频元数据已加载，可以设置时间
-              videoElement.currentTime = playHistory.progress;
-                  console.log('电影续播时间设置成功:', playHistory.progress);
-                  // 确保视频正在播放
-                  if (videoElement.paused) {
-                    safePlay(videoElement);
-                    setIsPlaying(true);
-                  } else {
-                    setIsPlaying(true);
-                  }
-                } else {
-                  // 视频元数据未加载，等待加载完成
-                  const onLoadedMetadata = () => {
-                    videoElement.currentTime = playHistory.progress;
-                    console.log('电影续播时间设置成功（元数据加载后）:', playHistory.progress);
-                    // 确保视频正在播放
-                    if (videoElement.paused) {
-                      safePlay(videoElement);
-                      setIsPlaying(true);
-                    } else {
-                      setIsPlaying(true);
-                    }
-                    videoElement.removeEventListener('loadedmetadata', onLoadedMetadata);
-                  };
-                  videoElement.addEventListener('loadedmetadata', onLoadedMetadata);
-                  // 如果等待时间过长，再次尝试
-                  setTimeout(() => setStartTime(attempts + 1), 1000);
-                }
-              } else {
-                // 视频元素不存在，延迟重试
-                setTimeout(() => setStartTime(attempts + 1), 500);
-              }
-            } catch (error) {
-              console.error('设置电影续播时间时出错:', error);
-              setTimeout(() => setStartTime(attempts + 1), 500);
-            }
-          } else {
-            // reactPlayerRef 不存在，延迟重试
-            setTimeout(() => setStartTime(attempts + 1), 500);
-          }
-        };
-        
-        // 延迟一点时间，等待播放器初始化
-        setTimeout(() => {
-          setStartTime();
-        }, 1000);
-      }
       if (result.meta.requestStatus === 'fulfilled') {
         console.log('电影播放地址获取成功');
         // 等待 Redux state 更新后再检查（保留日志，取消自动滚动）
@@ -1577,25 +1642,464 @@ const VideoDetail = () => {
     setPlayerReady(true);
     // 清除刚刚切换集数的标志，因为播放器已经准备好了
     justSwitchedEpisodeRef.current = false;
-    // 确保播放状态为 true，让 ReactPlayer 自动播放
-    setIsPlaying(true);
     
-    // 延迟一点时间，尝试手动播放以绕过可能的自动播放拦截
+    // 检查是否有续播时间需要设置
+    const resumeTime = resumeTimeRef.current;
+    if (resumeTime !== null && resumeTime !== undefined) {
+      console.log('✅ 检测到续播时间，将在视频准备好后设置:', resumeTime);
+    }
+    
+    // 不立即设置播放状态，等待视频元素真正准备好
+    // 对于 HLS 视频，需要等待 manifest 解析完成
+    // 对于普通视频，需要等待 readyState >= 2
+    
+    // 延迟检查视频元素状态，确保视频真正准备好
     setTimeout(() => {
-      if (reactPlayerRef.current) {
-        try {
-          const internalPlayer = reactPlayerRef.current.getInternalPlayer();
-          if (internalPlayer && internalPlayer.paused) {
-            internalPlayer.play().catch(err => {
-              console.warn('手动播放失败:', err);
+      try {
+        const videoElement = reactPlayerRef.current?.getInternalPlayer?.('video') || 
+                           (playerRef.current?.wrapper?.querySelector?.('video'));
+        
+        if (!videoElement || !document.contains(videoElement)) {
+          console.warn('视频元素不存在或已被移除');
+          return;
+        }
+        
+        // 如果有续播时间，先设置续播时间
+        if (resumeTime !== null && resumeTime !== undefined) {
+          const setResumeTime = () => {
+            try {
+              if (videoElement.readyState >= 1) {
+                // 视频元数据已加载，可以设置时间
+                videoElement.currentTime = resumeTime;
+                console.log('✅ 续播时间设置成功:', resumeTime, '秒');
+                resumeTimeRef.current = null; // 清除续播时间，避免重复设置
+              } else {
+                // 视频元数据未加载，等待加载完成
+                const onLoadedMetadata = () => {
+                  if (document.contains(videoElement)) {
+                    videoElement.currentTime = resumeTime;
+                    console.log('✅ 续播时间设置成功（元数据加载后）:', resumeTime, '秒');
+                    resumeTimeRef.current = null; // 清除续播时间
+                    videoElement.removeEventListener('loadedmetadata', onLoadedMetadata);
+                  }
+                };
+                videoElement.addEventListener('loadedmetadata', onLoadedMetadata, { once: true });
+              }
+            } catch (error) {
+              console.error('设置续播时间时出错:', error);
+            }
+          };
+          setResumeTime();
+        }
+        
+        const isHLSVideo = playUrl.url?.includes('m3u8');
+        
+        // 检查 HLS 实例状态
+        if (isHLSVideo) {
+          // 检查是否已有 HLS 实例附加到 video 元素
+          const hlsInstance = videoElement.hls;
+          
+          if (hlsInstance && hlsInstance.media === videoElement) {
+            // HLS 实例已附加，等待 manifest 解析完成
+            console.log('检测到 HLS 实例，等待 manifest 解析完成...');
+            
+            // 如果 manifest 已经解析完成，直接播放
+            if (hlsInstance.levels && hlsInstance.levels.length > 0) {
+              console.log('HLS manifest 已解析，等待视频元素准备好');
+              // 等待视频元素准备好
+              const checkAndPlay = () => {
+                if (document.contains(videoElement) && videoElement.readyState >= 1) {
+                  // 如果有续播时间，先设置续播时间
+                  if (resumeTime !== null && resumeTime !== undefined && resumeTimeRef.current !== null) {
+                    try {
+                      videoElement.currentTime = resumeTime;
+                      console.log('✅ HLS 续播时间设置成功:', resumeTime, '秒');
+                      resumeTimeRef.current = null; // 清除续播时间
+                    } catch (error) {
+                      console.error('设置 HLS 续播时间时出错:', error);
+                    }
+                  }
+                  console.log('HLS 视频已准备好，设置播放状态');
+    setIsPlaying(true);
+                  if (videoElement.paused && !isSeekingRef.current) {
+                    videoElement.play().catch(err => {
+                      if (err.name !== 'AbortError' || !err.message?.includes('removed from the document')) {
+                        console.warn('HLS 播放失败:', err);
+                      }
+                    });
+                  }
+                } else {
+                  // 如果还没准备好，等待 canplay 事件
+                  const onCanPlay = () => {
+                    if (document.contains(videoElement)) {
+                      // 如果有续播时间，先设置续播时间
+                      if (resumeTime !== null && resumeTime !== undefined && resumeTimeRef.current !== null) {
+                        try {
+                          videoElement.currentTime = resumeTime;
+                          console.log('✅ HLS 续播时间设置成功（canplay）:', resumeTime, '秒');
+                          resumeTimeRef.current = null; // 清除续播时间
+                        } catch (error) {
+                          console.error('设置 HLS 续播时间时出错:', error);
+                        }
+                      }
+                      console.log('HLS 视频可以播放，设置播放状态');
+                      setIsPlaying(true);
+                      if (videoElement.paused && !isSeekingRef.current) {
+                        videoElement.play().catch(err => {
+                          if (err.name !== 'AbortError' || !err.message?.includes('removed from the document')) {
+                            console.warn('HLS 播放失败:', err);
+                          }
+                        });
+                      }
+                    }
+                    videoElement.removeEventListener('canplay', onCanPlay);
+                  };
+                  videoElement.addEventListener('canplay', onCanPlay, { once: true });
+                }
+              };
+              
+              // 延迟一点检查，给视频元素时间初始化
+              setTimeout(checkAndPlay, 200);
+            } else {
+              // manifest 还没解析完成，等待 MANIFEST_PARSED 事件
+              console.log('等待 HLS manifest 解析...');
+              const onManifestParsed = () => {
+                console.log('HLS manifest 解析完成，等待视频元素准备好');
+                const waitForReady = () => {
+                  if (document.contains(videoElement) && videoElement.readyState >= 1) {
+                    console.log('HLS 视频已准备好，设置播放状态');
+                    setIsPlaying(true);
+                    if (videoElement.paused && !isSeekingRef.current) {
+                      videoElement.play().catch(err => {
+                        if (err.name !== 'AbortError' || !err.message?.includes('removed from the document')) {
+                          console.warn('HLS 播放失败:', err);
+                        }
+                      });
+                    }
+                  } else {
+                    // 等待 canplay 事件
+                    const onCanPlay = () => {
+                      if (document.contains(videoElement)) {
+                        console.log('HLS 视频可以播放，设置播放状态');
+                        setIsPlaying(true);
+                        if (videoElement.paused && !isSeekingRef.current) {
+                          videoElement.play().catch(err => {
+                            if (err.name !== 'AbortError' || !err.message?.includes('removed from the document')) {
+                              console.warn('HLS 播放失败:', err);
+                            }
+                          });
+                        }
+                      }
+                      videoElement.removeEventListener('canplay', onCanPlay);
+                    };
+                    videoElement.addEventListener('canplay', onCanPlay, { once: true });
+                  }
+                };
+                setTimeout(waitForReady, 500);
+                hlsInstance.off(Hls.Events.MANIFEST_PARSED, onManifestParsed);
+              };
+              hlsInstance.on(Hls.Events.MANIFEST_PARSED, onManifestParsed);
+              
+              // 设置超时，如果 5 秒后还没有解析完成，也尝试播放（可能是网络慢）
+    setTimeout(() => {
+                if (document.contains(videoElement) && videoElement.readyState >= 1) {
+                  console.log('HLS manifest 解析超时，尝试播放');
+                  setIsPlaying(true);
+                  if (videoElement.paused && !isSeekingRef.current) {
+                    videoElement.play().catch(err => {
+                      if (err.name !== 'AbortError' || !err.message?.includes('removed from the document')) {
+                        console.warn('HLS 播放失败:', err);
+                      }
+                    });
+                  }
+                }
+              }, 5000);
+            }
+            
+            return; // HLS 视频已处理，不需要继续普通视频的逻辑
+          } else {
+            // HLS 实例还没创建（可能在 onStart 中延迟创建），等待一下
+            console.log('HLS 实例还未创建，等待 onStart 回调创建...');
+            // 不立即返回，让普通视频的逻辑处理（但 HLS 视频的 readyState 可能一直是 0）
+            // 实际上，对于 HLS 视频，我们应该等待 onStart 中创建的实例
+            // 所以这里先不设置播放状态，等待 onStart 中的 MANIFEST_PARSED 事件
+            return;
+          }
+        }
+        
+        // 对于普通视频，检查 readyState
+        // 需要等待 readyState >= 3 (HAVE_FUTURE_DATA) 或至少 >= 2 (HAVE_CURRENT_DATA) 才能安全播放
+        if (videoElement.readyState >= 3) {
+          // 视频已加载足够数据，可以安全播放
+          // 如果有续播时间，先设置续播时间
+          if (resumeTime !== null && resumeTime !== undefined && resumeTimeRef.current !== null) {
+            try {
+              videoElement.currentTime = resumeTime;
+              console.log('✅ 续播时间设置成功 (readyState >= 3):', resumeTime, '秒');
+              resumeTimeRef.current = null; // 清除续播时间
+            } catch (error) {
+              console.error('设置续播时间时出错:', error);
+            }
+          }
+          console.log('视频元素已准备好 (readyState >= 3)，设置播放状态');
+          setIsPlaying(true);
+          if (videoElement.paused && !isSeekingRef.current) {
+            videoElement.play().catch(err => {
+              if (err.name !== 'AbortError' || !err.message?.includes('removed from the document')) {
+                console.warn('播放失败:', err);
+              }
             });
           }
-        } catch (err) {
-          console.error('手动播放异常:', err);
+        } else if (videoElement.readyState >= 2) {
+          // readyState >= 2，等待 canplaythrough 事件（表示可以流畅播放）
+          console.log('视频元素 readyState >= 2，等待 canplaythrough...');
+          const onCanPlayThrough = () => {
+            if (document.contains(videoElement)) {
+              // 如果有续播时间，先设置续播时间
+              if (resumeTime !== null && resumeTime !== undefined && resumeTimeRef.current !== null) {
+                try {
+                  videoElement.currentTime = resumeTime;
+                  console.log('✅ 续播时间设置成功 (canplaythrough):', resumeTime, '秒');
+                  resumeTimeRef.current = null; // 清除续播时间
+                } catch (error) {
+                  console.error('设置续播时间时出错:', error);
+                }
+              }
+              console.log('视频可以流畅播放，设置播放状态');
+              setIsPlaying(true);
+              if (videoElement.paused && !isSeekingRef.current) {
+                videoElement.play().catch(err => {
+                  if (err.name !== 'AbortError' || !err.message?.includes('removed from the document')) {
+                    console.warn('播放失败:', err);
+                  }
+                });
+              }
+            }
+            videoElement.removeEventListener('canplaythrough', onCanPlayThrough);
+          };
+          videoElement.addEventListener('canplaythrough', onCanPlayThrough, { once: true });
+          
+          // 也监听 canplay 事件作为后备
+        } else {
+          // readyState < 2，等待 canplay 事件
+          console.log('视频元素 readyState < 2，等待 canplay...');
+          const onCanPlay = () => {
+            if (document.contains(videoElement)) {
+              // 如果有续播时间，先设置续播时间
+              if (resumeTime !== null && resumeTime !== undefined && resumeTimeRef.current !== null) {
+                try {
+                  videoElement.currentTime = resumeTime;
+                  console.log('✅ 续播时间设置成功 (canplay):', resumeTime, '秒');
+                  resumeTimeRef.current = null; // 清除续播时间
+                } catch (error) {
+                  console.error('设置续播时间时出错:', error);
+                }
+              }
+              console.log('视频可以播放，设置播放状态');
+              setIsPlaying(true);
+              if (videoElement.paused && !isSeekingRef.current) {
+                videoElement.play().catch(err => {
+                  if (err.name !== 'AbortError' || !err.message?.includes('removed from the document')) {
+                    console.warn('播放失败:', err);
+                  }
+                });
+              }
+            }
+            videoElement.removeEventListener('canplay', onCanPlay);
+          };
+          videoElement.addEventListener('canplay', onCanPlay, { once: true });
         }
+      } catch (error) {
+        console.error('检查视频元素状态时出错:', error);
       }
-    }, 1000);
+    }, 500);
   };
+
+  // 提取续播逻辑为独立函数（使用 useCallback 确保函数引用稳定）
+  // 注意：此函数必须在 handlePlay、handlePlayFromTime 和 handleMoviePlay 之后定义
+  const executeAutoPlayFromHistory = useCallback((playHistory) => {
+    console.log('executeAutoPlayFromHistory 被调用:', {
+      playHistory,
+      hasVideoInfo: !!videoInfo,
+      hasAutoPlayed: hasAutoPlayFromHistoryRef.current,
+      selectedEpisode,
+      isEpisodePlaying
+    });
+    
+    if (!playHistory) {
+      console.warn('executeAutoPlayFromHistory: 没有播放记录数据');
+      return;
+    }
+    
+    if (!videoInfo) {
+      console.warn('executeAutoPlayFromHistory: videoInfo 未加载，等待加载完成');
+      return;
+    }
+    
+    if (hasAutoPlayFromHistoryRef.current) {
+      console.warn('executeAutoPlayFromHistory: 已经处理过续播，跳过');
+      return;
+    }
+    
+    // 判断是否为剧集类型
+    const isEpisodeType = ['tv', 'anime', 'tvshow', 'documentary', 'doc'].includes(
+      playHistory.videoType || videoInfo.type
+    );
+    
+    console.log('executeAutoPlayFromHistory: 判断视频类型', {
+      videoType: playHistory.videoType || videoInfo.type,
+      isEpisodeType,
+      episode: playHistory.episode
+    });
+    
+    if (isEpisodeType && playHistory.episode !== null && playHistory.episode !== undefined) {
+      // 等待episodes数据加载
+      if (episodes.data && episodes.data.length > 0) {
+        // 检查该集数是否存在
+        const episodeExists = episodes.data.some(ep => {
+          const episodeNumber = ep.episode_number || ep.id;
+          return episodeNumber === playHistory.episode;
+        });
+        
+        console.log('executeAutoPlayFromHistory: 检查集数', {
+          episodeExists,
+          targetEpisode: playHistory.episode,
+          selectedEpisode,
+          isEpisodePlaying
+        });
+        
+        // 放宽条件：即使 selectedEpisode 已设置，如果集数匹配，也允许续播
+        if (episodeExists && (selectedEpisode === null || selectedEpisode === undefined || selectedEpisode === playHistory.episode)) {
+          console.log('✅ 从播放记录自动选择集数:', playHistory.episode, '续播进度:', playHistory.progress);
+          hasAutoPlayFromHistoryRef.current = true;
+          setTimeout(() => {
+            const progress = Number(playHistory.progress) || 0;
+            const duration = Number(playHistory.duration) || 0;
+            console.log('准备续播，进度:', progress, '总时长:', duration);
+            if (progress > 0 && (duration === 0 || progress < duration)) {
+              console.log('✅ 从播放记录续播，进度:', progress, '总时长:', duration);
+              handlePlayFromTime(playHistory.episode, progress);
+            } else {
+              console.log('从播放记录从头播放（进度为0或已播放完成）');
+              handlePlay(playHistory.episode);
+            }
+          }, 300);
+        } else {
+          console.warn('executeAutoPlayFromHistory: 集数不存在或条件不满足', {
+            episodeExists,
+            selectedEpisode,
+            isEpisodePlaying,
+            targetEpisode: playHistory.episode
+          });
+        }
+      } else {
+        console.warn('executeAutoPlayFromHistory: episodes 数据未加载');
+      }
+    } else if (!isEpisodeType && playHistory.episode === null) {
+      // 电影类型，自动开始播放
+      const progress = Number(playHistory.progress) || 0;
+      const duration = Number(playHistory.duration) || 0;
+      console.log('✅ 从播放记录自动播放电影，续播进度:', progress, '总时长:', duration);
+      hasAutoPlayFromHistoryRef.current = true;
+      setTimeout(() => {
+        if (progress > 0 && (duration === 0 || progress < duration)) {
+          console.log('从播放记录续播电影，进度:', progress);
+          // 存储续播时间，等待播放器准备好后设置
+          resumeTimeRef.current = progress;
+          console.log('✅ 设置电影续播时间到 ref:', progress);
+          handleMoviePlay();
+        } else {
+          // 从头播放，清除续播时间
+          resumeTimeRef.current = null;
+          handleMoviePlay();
+        }
+      }, 300);
+    }
+  }, [videoInfo, episodes.data, selectedEpisode, isMoviePlaying, isEpisodePlaying, handlePlay, handlePlayFromTime, handleMoviePlay, reactPlayerRef, playerRef, setIsPlaying]);
+  
+  // 从播放记录跳转时，自动选择对应的集数并开始播放
+  // 注意：此 useEffect 必须在 executeAutoPlayFromHistory 定义之后
+  useEffect(() => {
+    // 优先从 location.state 获取播放记录
+    let playHistory = location.state?.playHistory;
+    
+    // 如果没有从 state 获取到，尝试从 Electron API 获取的 videoData 中读取
+    if (!playHistory && window.electronAPI && window.electronAPI.getVideoData) {
+      window.electronAPI.getVideoData().then((data) => {
+        if (data?.playHistory) {
+          const electronPlayHistory = data.playHistory;
+          console.log('✅ 从 Electron API 获取播放记录:', electronPlayHistory);
+          // 如果 videoInfo 已加载，立即执行续播逻辑
+          if (videoInfo && !hasAutoPlayFromHistoryRef.current) {
+            console.log('videoInfo 已加载，立即执行续播逻辑（Electron API）');
+            executeAutoPlayFromHistory(electronPlayHistory);
+          } else {
+            console.log('等待 videoInfo 加载完成（Electron API）...', { hasVideoInfo: !!videoInfo, hasAutoPlayed: hasAutoPlayFromHistoryRef.current });
+          }
+        } else {
+          console.log('Electron API 数据中没有 playHistory');
+        }
+      }).catch(err => {
+        console.error('从 Electron API 获取播放记录失败:', err);
+      });
+    }
+    
+    // 如果还是没有，尝试从 localStorage 读取（作为最后的备用方案）
+    if (!playHistory && id) {
+      try {
+        const storedHistory = getVideoPlayHistory(id);
+        console.log('从 localStorage 读取播放记录:', storedHistory);
+        if (storedHistory && (storedHistory.progress > 0 || storedHistory.duration > 0)) {
+          playHistory = {
+            videoId: storedHistory.videoId,
+            videoTitle: storedHistory.videoTitle,
+            videoCover: storedHistory.videoCover,
+            videoType: storedHistory.videoType,
+            episode: storedHistory.episode,
+            progress: storedHistory.progress,
+            duration: storedHistory.duration
+          };
+          console.log('✅ 从 localStorage 读取播放记录用于续播:', playHistory);
+        }
+      } catch (error) {
+        console.error('从 localStorage 读取播放记录失败:', error);
+      }
+    }
+    
+    // 如果已经处理过，或者没有播放记录，直接返回
+    if (!playHistory) {
+      console.log('没有播放记录，跳过续播');
+      return;
+    }
+    
+    if (!videoInfo) {
+      console.log('videoInfo 未加载，等待加载完成后再续播');
+      return;
+    }
+    
+    if (hasAutoPlayFromHistoryRef.current) {
+      console.log('已经处理过续播，跳过');
+      return;
+    }
+    
+    // 执行续播逻辑
+    console.log('✅ 准备执行续播逻辑，播放记录:', playHistory);
+    executeAutoPlayFromHistory(playHistory);
+  }, [location.state, videoInfo, episodes.data, selectedEpisode, isMoviePlaying, isEpisodePlaying, id, executeAutoPlayFromHistory]);
+  
+  // 当 videoInfo 加载完成后，如果之前从 Electron API 获取到了 playHistory，也触发续播
+  useEffect(() => {
+    if (videoInfo && window.electronAPI && window.electronAPI.getVideoData && !hasAutoPlayFromHistoryRef.current) {
+      window.electronAPI.getVideoData().then((data) => {
+        if (data?.playHistory && !location.state?.playHistory) {
+          console.log('videoInfo 加载完成，从 Electron API 获取播放记录并续播:', data.playHistory);
+          executeAutoPlayFromHistory(data.playHistory);
+        }
+      }).catch(err => {
+        // 忽略错误，可能已经处理过了
+      });
+    }
+  }, [videoInfo, executeAutoPlayFromHistory, location.state]);
 
   // 处理点击推荐视频，在新窗口打开视频详情页
   const handleRelatedVideoClick = (e, video) => {
@@ -2210,10 +2714,29 @@ const VideoDetail = () => {
     
     // 如果获取播放地址失败
     if (playUrl.error) {
+      // 格式化错误信息，确保显示有意义的字符串
+      const formatError = (error) => {
+        if (!error) return '未知错误';
+        if (typeof error === 'string') return error;
+        if (error.message) return error.message;
+        if (error.toString && error.toString() !== '[object Object]') return error.toString();
+        if (error.error) return formatError(error.error);
+        if (error.data?.message) return error.data.message;
+        if (error.response?.data?.message) return error.response.data.message;
+        // 尝试 JSON 序列化
+        try {
+          const jsonStr = JSON.stringify(error);
+          if (jsonStr !== '{}') return jsonStr;
+        } catch (e) {}
+        return '播放错误，请重试';
+      };
+      
+      const errorMessage = formatError(playUrl.error);
+      
       return (
         <div className="video-detail-player-overlay">
           <div className="error-container">
-            <div className="error-message">播放错误: {playUrl.error}</div>
+            <div className="error-message">播放错误: {errorMessage}</div>
             <button className="control-button" onClick={() => {
               if (isMovieType) {
                 handleMoviePlay();
@@ -2257,6 +2780,53 @@ const VideoDetail = () => {
     }
     
     // 渲染播放器
+    // 如果有加载错误或超时，显示错误信息
+    if (videoLoadError || videoLoadTimeout) {
+      const isHLS = playUrl.url?.toLowerCase().includes('.m3u8') || 
+                   playUrl.url?.toLowerCase().includes('hls');
+      const errorMessage = videoLoadTimeout 
+        ? `视频加载超时${isHLS ? '（HLS视频可能需要更长时间）' : '，请检查网络连接'}` 
+        : (videoLoadError || '视频加载失败');
+      
+      return (
+        <div className="video-detail-player-overlay">
+          <div className="error-container">
+            <div className="error-message">{errorMessage}</div>
+            <div className="error-detail" style={{ fontSize: '12px', color: '#999', marginTop: '5px' }}>
+              URL: {playUrl.url ? (playUrl.url.length > 60 ? playUrl.url.substring(0, 60) + '...' : playUrl.url) : '无'}
+            </div>
+            {isHLS && videoLoadTimeout && (
+              <div className="error-detail" style={{ fontSize: '11px', color: '#888', marginTop: '8px' }}>
+                提示：HLS视频流加载可能需要更长时间，请确保网络连接稳定
+              </div>
+            )}
+            <button className="control-button" onClick={() => {
+              setVideoLoadError(null);
+              setVideoLoadTimeout(false);
+              errorRetryRef.current = 0; // 重置错误重试计数
+              // 清除超时定时器
+              if (videoLoadTimeoutRef.current) {
+                clearTimeout(videoLoadTimeoutRef.current);
+                videoLoadTimeoutRef.current = null;
+              }
+              // 清除格式错误重试定时器
+              if (formatErrorRetryTimerRef.current) {
+                clearTimeout(formatErrorRetryTimerRef.current);
+                formatErrorRetryTimerRef.current = null;
+              }
+              if (isMovieType) {
+                handleMoviePlay();
+              } else {
+                handlePlay(selectedEpisode || 1);
+              }
+            }}>
+              重试
+            </button>
+          </div>
+        </div>
+      );
+    }
+
             return (
       <div className="video-detail-player-overlay">
         <div className="video-player-container-inline" ref={el => {
@@ -2294,51 +2864,764 @@ const VideoDetail = () => {
             }}
             onReady={() => {
               console.log('ReactPlayer onReady 被调用，准备开始播放');
+              // 清除加载超时
+              if (videoLoadTimeoutRef.current) {
+                clearTimeout(videoLoadTimeoutRef.current);
+                videoLoadTimeoutRef.current = null;
+              }
+              setVideoLoadError(null);
+              setVideoLoadTimeout(false);
               handlePlayerReady();
+              
+              // 添加视频元素的事件监听，用于处理播放过程中的错误和缓冲
+              setTimeout(() => {
+                try {
+                  const videoElement = reactPlayerRef.current?.getInternalPlayer?.('video') || 
+                                     (playerRef.current?.wrapper?.querySelector?.('video'));
+                  if (videoElement && document.contains(videoElement)) {
+                    // 清理之前的事件监听器（如果存在）
+                    if (videoElement._eventListeners) {
+                      videoElement._eventListeners.forEach(({ type, handler }) => {
+                        videoElement.removeEventListener(type, handler);
+                      });
+                    }
+                    
+                    // 监听 playing 事件（视频开始播放）
+                    const onPlaying = () => {
+                      console.log('视频开始播放，清除超时和错误状态');
+                      // 清除缓冲标志
+                      if (videoElement._isBuffering) {
+                        videoElement._isBuffering = false;
+                        console.log('清除缓冲标志');
+                      }
+                      // 清除超时和错误状态
+                      if (videoLoadTimeoutRef.current) {
+                        clearTimeout(videoLoadTimeoutRef.current);
+                        videoLoadTimeoutRef.current = null;
+                      }
+                      setVideoLoadError(null);
+                      setVideoLoadTimeout(false);
+                      // 确保播放状态正确
+                      if (!isPlaying) {
+                        setIsPlaying(true);
+                        isPlayingRef.current = true;
+                      }
+                    };
+                    videoElement.addEventListener('playing', onPlaying);
+                    
+                    // 监听 waiting 事件（视频缓冲不足）
+                    const onWaiting = () => {
+                      console.log('视频缓冲不足，等待数据加载...');
+                      // 不设置错误，只是记录日志
+                      // 标记正在缓冲，避免 onPause 误判为用户手动暂停
+                      videoElement._isBuffering = true;
+                      // 保持播放状态，不要设置为 false
+                      isPlayingRef.current = isPlaying || isPlayingRef.current;
+                    };
+                    videoElement.addEventListener('waiting', onWaiting);
+                    
+                    // 监听 canplay 事件（缓冲完成，可以播放）
+                    const onCanPlayAfterWaiting = () => {
+                      console.log('缓冲完成，canplay 事件触发，_isBuffering:', videoElement._isBuffering, 'isPlayingRef:', isPlayingRef.current, 'paused:', videoElement.paused);
+                      // 如果之前是因为缓冲不足而暂停，且用户希望播放，则自动恢复播放
+                      if (videoElement._isBuffering) {
+                        videoElement._isBuffering = false;
+                        // 如果视频应该播放但处于暂停状态，自动恢复播放
+                        if ((isPlayingRef.current || isPlaying) && videoElement.paused && document.contains(videoElement)) {
+                          console.log('缓冲完成，自动恢复播放');
+                          videoElement.play().then(() => {
+                            console.log('缓冲完成后自动播放成功');
+                            setIsPlaying(true);
+                            isPlayingRef.current = true;
+                          }).catch(err => {
+                            if (err.name !== 'AbortError') {
+                              console.warn('缓冲完成后自动播放失败:', err);
+                            }
+                          });
+                        }
+                      }
+                    };
+                    videoElement.addEventListener('canplay', onCanPlayAfterWaiting);
+                    videoElement.addEventListener('canplaythrough', onCanPlayAfterWaiting);
+                    
+                    // 监听 stalled 事件（视频加载停滞）
+                    const onStalled = () => {
+                      console.warn('视频加载停滞');
+                      // 如果是 HLS 视频，尝试恢复
+                      if (videoElement.hls && playUrl.url?.includes('m3u8')) {
+                        console.log('HLS 视频加载停滞，尝试恢复...');
+                        try {
+                          videoElement.hls.startLoad();
+                        } catch (err) {
+                          console.error('HLS 恢复失败:', err);
+                        }
+                      }
+                    };
+                    videoElement.addEventListener('stalled', onStalled);
+                    
+                    // 监听 error 事件（播放过程中的错误）
+                    const onVideoError = () => {
+                      if (videoElement.error) {
+                        console.error('视频元素错误:', videoElement.error);
+                        const errorCode = videoElement.error.code;
+                        // 如果是网络错误或解码错误，尝试恢复
+                        if (errorCode === 2 || errorCode === 3) {
+                          // MEDIA_ERR_NETWORK 或 MEDIA_ERR_DECODE
+                          if (videoElement.hls && playUrl.url?.includes('m3u8')) {
+                            console.log('HLS 视频错误，尝试恢复...');
+                            try {
+                              if (errorCode === 2) {
+                                videoElement.hls.startLoad();
+                              } else if (errorCode === 3) {
+                                videoElement.hls.recoverMediaError();
+                              }
+                            } catch (err) {
+                              console.error('HLS 错误恢复失败:', err);
+                              // 如果恢复失败，显示错误信息
+                              setVideoLoadError(`视频播放错误: ${videoElement.error.message || '未知错误'}`);
+                            }
+                          } else {
+                            // 普通视频错误，显示错误信息
+                            setVideoLoadError(`视频播放错误: ${videoElement.error.message || '未知错误'}`);
+                          }
+                        }
+                      }
+                    };
+                    videoElement.addEventListener('error', onVideoError);
+                    
+                    // 保存事件监听器引用，以便后续清理
+                    videoElement._eventListeners = [
+                      { type: 'playing', handler: onPlaying },
+                      { type: 'waiting', handler: onWaiting },
+                      { type: 'stalled', handler: onStalled },
+                      { type: 'error', handler: onVideoError },
+                      { type: 'canplay', handler: onCanPlayAfterWaiting },
+                      { type: 'canplaythrough', handler: onCanPlayAfterWaiting }
+                    ];
+                  }
+                } catch (err) {
+                  console.error('添加视频元素事件监听失败:', err);
+                }
+              }, 500);
+              
+              // 延迟设置播放状态，确保视频元素已完全准备好且仍在 DOM 中
+              setTimeout(() => {
+                try {
+                  // 检查视频元素是否存在且仍在 DOM 中
+                  const videoElement = reactPlayerRef.current?.getInternalPlayer?.('video') || 
+                                     (playerRef.current?.wrapper?.querySelector?.('video'));
+                  
+                  console.log('onReady: 检查视频元素状态', {
+                    hasElement: !!videoElement,
+                    inDocument: videoElement ? document.contains(videoElement) : false,
+                    readyState: videoElement?.readyState,
+                    networkState: videoElement?.networkState,
+                    src: videoElement?.src,
+                    currentSrc: videoElement?.currentSrc,
+                    paused: videoElement?.paused
+                  });
+                  
+                  // 检查元素是否仍在文档中
+                  if (videoElement && document.contains(videoElement)) {
+                    // 确保视频元素有正确的 src
+                    if (!videoElement.src && !videoElement.currentSrc && playUrl.url) {
+                      console.log('视频元素缺少 src，尝试设置:', playUrl.url);
+                      videoElement.src = playUrl.url;
+                    }
+                    
+                    // 检查是否为 HLS 视频
+                    const isHLSVideo = playUrl.url?.includes('m3u8');
+                    
+                    if (isHLSVideo) {
+                      // HLS 视频：等待 manifest 解析完成
+                      const hlsInstance = videoElement.hls;
+                      if (hlsInstance && hlsInstance.media === videoElement) {
+                        if (hlsInstance.levels && hlsInstance.levels.length > 0) {
+                          // manifest 已解析，等待视频元素准备好
+                          const waitForReady = () => {
+                            if (document.contains(videoElement) && videoElement.readyState >= 1) {
+                              console.log('HLS 视频已准备好，设置播放状态');
               setIsPlaying(true);
+                            } else {
+                              // 等待 canplay 事件
+                              const onCanPlay = () => {
+                                if (document.contains(videoElement)) {
+                                  console.log('HLS 视频可以播放，设置播放状态');
+                                  setIsPlaying(true);
+                                }
+                                videoElement.removeEventListener('canplay', onCanPlay);
+                              };
+                              videoElement.addEventListener('canplay', onCanPlay, { once: true });
+                            }
+                          };
+                          setTimeout(waitForReady, 300);
+                        } else {
+                          // 等待 manifest 解析
+                          const onManifestParsed = () => {
+                            console.log('HLS manifest 解析完成，等待视频元素准备好');
+                            const waitForReady = () => {
+                              if (document.contains(videoElement) && videoElement.readyState >= 1) {
+                                console.log('HLS 视频已准备好，设置播放状态');
+                                setIsPlaying(true);
+                              } else {
+                                // 等待 canplay 事件
+                                const onCanPlay = () => {
+                                  if (document.contains(videoElement)) {
+                                    console.log('HLS 视频可以播放，设置播放状态');
+                                    setIsPlaying(true);
+                                  }
+                                  videoElement.removeEventListener('canplay', onCanPlay);
+                                };
+                                videoElement.addEventListener('canplay', onCanPlay, { once: true });
+                              }
+                            };
+                            setTimeout(waitForReady, 500);
+                            hlsInstance.off(Hls.Events.MANIFEST_PARSED, onManifestParsed);
+                          };
+                          hlsInstance.on(Hls.Events.MANIFEST_PARSED, onManifestParsed);
+                        }
+                      } else {
+                        // HLS 实例还未创建，等待 onStart 创建
+                        console.log('HLS 实例还未创建，等待 onStart 创建...');
+                      }
+                      return; // HLS 视频已处理
+                    }
+                    
+                    // 普通视频：等待 readyState >= 3 (HAVE_FUTURE_DATA) 或至少 >= 2 (HAVE_CURRENT_DATA)
+                    if (videoElement.readyState >= 3) {
+                      // 视频已加载足够数据，可以安全播放
+                      console.log('视频元素已准备好 (readyState >= 3)，设置播放状态');
+                      setIsPlaying(true);
+                    } else if (videoElement.readyState >= 2) {
+                      // readyState >= 2，等待 canplaythrough 事件
+                      console.log('视频元素 readyState >= 2，等待 canplaythrough...');
+                      const onCanPlayThrough = () => {
+                        if (document.contains(videoElement)) {
+                          console.log('视频可以流畅播放，设置播放状态');
+                          setIsPlaying(true);
+                        }
+                        videoElement.removeEventListener('canplaythrough', onCanPlayThrough);
+                      };
+                      videoElement.addEventListener('canplaythrough', onCanPlayThrough, { once: true });
+                      
+                      // 也监听 canplay 事件作为后备
+                      const onCanPlay = () => {
+                        if (document.contains(videoElement)) {
+                          console.log('视频可以播放，设置播放状态');
+                          setIsPlaying(true);
+                        }
+                        videoElement.removeEventListener('canplay', onCanPlay);
+                      };
+                      videoElement.addEventListener('canplay', onCanPlay, { once: true });
+                    } else {
+                      // 等待视频元素准备好
+                      console.log('等待视频元素准备好，当前 readyState:', videoElement.readyState);
+                      
+                      // 如果 readyState 为 0，尝试手动加载
+                      if (videoElement.readyState === 0) {
+                        console.log('视频元素 readyState 为 0，尝试手动加载');
+                        videoElement.load();
+                      }
+                      
+                      // 等待 loadeddata 事件（readyState >= 2）
+                      const onLoadedData = () => {
+                        if (document.contains(videoElement) && videoElement.readyState >= 2) {
+                          console.log('视频数据已加载，等待更多数据...');
+                          // 继续等待 canplay 或 canplaythrough
+                          const onCanPlayThrough = () => {
+                            if (document.contains(videoElement)) {
+                              console.log('视频可以流畅播放，设置播放状态');
+                              setIsPlaying(true);
+                            }
+                            videoElement.removeEventListener('canplaythrough', onCanPlayThrough);
+                          };
+                          videoElement.addEventListener('canplaythrough', onCanPlayThrough, { once: true });
+                          
+                          const onCanPlay = () => {
+                            if (document.contains(videoElement)) {
+                              console.log('视频可以播放，设置播放状态');
+                              setIsPlaying(true);
+                            }
+                            videoElement.removeEventListener('canplay', onCanPlay);
+                          };
+                          videoElement.addEventListener('canplay', onCanPlay, { once: true });
+                        }
+                        videoElement.removeEventListener('loadeddata', onLoadedData);
+                      };
+                      videoElement.addEventListener('loadeddata', onLoadedData, { once: true });
+                    }
+                  } else {
+                    // 视频元素不存在或已被移除，延迟重试
+                    console.warn('视频元素不存在或已被移除，延迟设置播放状态');
+                    setTimeout(() => {
+                      setIsPlaying(true);
+                    }, 500);
+                  }
+                } catch (error) {
+                  console.warn('检查视频元素时出错，延迟设置播放状态:', error);
+                  // 延迟设置，给视频元素更多时间初始化
+                  setTimeout(() => {
+                    setIsPlaying(true);
+                  }, 500);
+                }
+              }, 200); // 增加延迟时间，给视频元素更多初始化时间
             }}
             onError={(e) => {
               console.error('ReactPlayer 播放出错:', e);
-              // 如果是 HLS 错误，尝试重新加载
-              if (playUrl.url) {
-                console.log('尝试恢复播放，当前 URL:', playUrl.url);
+              
+              // 清除格式错误重试定时器
+              if (formatErrorRetryTimerRef.current) {
+                clearTimeout(formatErrorRetryTimerRef.current);
+                formatErrorRetryTimerRef.current = null;
               }
-              dispatch({ type: 'video/fetchPlayUrl/rejected', payload: { message: '视频加载失败，请检查网络或重试' } });
+              
+              // 清除加载超时
+              if (videoLoadTimeoutRef.current) {
+                clearTimeout(videoLoadTimeoutRef.current);
+                videoLoadTimeoutRef.current = null;
+              }
+              
+              // 从 React 合成事件中提取实际的视频元素错误
+              let errorMessage = '视频加载失败，请检查网络或重试';
+              let isFormatError = false;
+              
+              try {
+                // 尝试从事件目标（video 元素）获取错误
+                const videoElement = e?.target || e?.nativeEvent?.target || 
+                                   reactPlayerRef.current?.getInternalPlayer?.('video') || 
+                                   (playerRef.current?.wrapper?.querySelector?.('video'));
+                
+                if (videoElement && videoElement.error) {
+                  const mediaError = videoElement.error;
+                  const errorMsg = mediaError.message || '';
+                  isFormatError = mediaError.code === 4 || errorMsg.includes('Format error') || errorMsg.includes('MEDIA_ELEMENT_ERROR');
+                  
+                  console.error('视频元素错误详情:', {
+                    code: mediaError.code,
+                    message: mediaError.message,
+                    networkState: videoElement.networkState,
+                    readyState: videoElement.readyState,
+                    src: videoElement.src,
+                    currentSrc: videoElement.currentSrc,
+                    isFormatError: isFormatError
+                  });
+                  
+                  // 对于格式错误，如果视频还在加载中，延迟判断（可能是初始化问题）
+                  if (isFormatError && videoElement.readyState < 2 && errorRetryRef.current === 0) {
+                    console.log('检测到格式错误，但视频还在加载中，延迟判断...');
+                    errorRetryRef.current = 1;
+                    
+                    // 延迟 2 秒后重新检查
+                    formatErrorRetryTimerRef.current = setTimeout(() => {
+                      const currentVideoElement = reactPlayerRef.current?.getInternalPlayer?.('video') || 
+                                                 (playerRef.current?.wrapper?.querySelector?.('video'));
+                      
+                      if (currentVideoElement) {
+                        // 如果视频元素现在有错误且 readyState 仍然很低，才显示错误
+                        if (currentVideoElement.error && currentVideoElement.readyState < 2) {
+                          console.error('延迟检查后仍然有错误，显示错误信息');
+                          const finalError = currentVideoElement.error;
+                          let finalErrorMessage = '视频格式不支持或源地址无效';
+                          if (finalError.message) {
+                            finalErrorMessage += `: ${finalError.message}`;
+                          }
+                          setVideoLoadError(finalErrorMessage);
+                          dispatch({ type: 'video/fetchPlayUrl/rejected', payload: { message: finalErrorMessage } });
+                        } else {
+                          console.log('延迟检查后错误已消失，视频可能已正常加载');
+                          // 错误已消失，尝试播放
+                          if (currentVideoElement.paused && !isSeekingRef.current && document.contains(currentVideoElement)) {
+                            currentVideoElement.play().catch(err => {
+                              console.warn('自动播放失败:', err);
+                            });
+                          }
+                        }
+                      }
+                      formatErrorRetryTimerRef.current = null;
+                    }, 2000);
+                    
+                    return; // 延迟判断，不立即显示错误
+                  }
+                  
+                  // 根据错误代码提供具体的错误信息
+                  switch (mediaError.code) {
+                    case 1: // MEDIA_ERR_ABORTED
+                      errorMessage = '视频加载被中止，请重试';
+                      break;
+                    case 2: // MEDIA_ERR_NETWORK
+                      errorMessage = '网络错误，无法加载视频。请检查网络连接或稍后重试';
+                      break;
+                    case 3: // MEDIA_ERR_DECODE
+                      errorMessage = '视频解码错误，可能是视频文件损坏或格式不支持';
+                      break;
+                    case 4: // MEDIA_ERR_SRC_NOT_SUPPORTED
+                      errorMessage = '视频格式不支持或源地址无效';
+                      break;
+                    default:
+                      errorMessage = `视频播放错误 (错误代码: ${mediaError.code})`;
+                  }
+                  
+                  // 如果有错误消息，添加到错误信息中
+                  if (mediaError.message) {
+                    errorMessage += `: ${mediaError.message}`;
+                  }
+                } else if (e?.message) {
+                  // 如果事件本身有消息
+                  errorMessage = e.message;
+                  isFormatError = errorMessage.includes('Format error') || errorMessage.includes('MEDIA_ELEMENT_ERROR');
+                } else if (typeof e === 'string') {
+                  // 如果事件是字符串
+                  errorMessage = e;
+                  isFormatError = errorMessage.includes('Format error') || errorMessage.includes('MEDIA_ELEMENT_ERROR');
+                } else if (e?.error) {
+                  // 如果事件有 error 属性
+                  if (typeof e.error === 'string') {
+                    errorMessage = e.error;
+                    isFormatError = errorMessage.includes('Format error') || errorMessage.includes('MEDIA_ELEMENT_ERROR');
+                  } else if (e.error.message) {
+                    errorMessage = e.error.message;
+                    isFormatError = errorMessage.includes('Format error') || errorMessage.includes('MEDIA_ELEMENT_ERROR');
+              }
+                }
+              } catch (err) {
+                console.error('提取错误信息时出错:', err);
+                errorMessage = '视频加载失败，请检查网络或重试';
+              }
+              
+              // 如果不是格式错误或已经重试过，立即显示错误
+              if (!isFormatError || errorRetryRef.current > 0) {
+                console.error('最终错误信息:', errorMessage);
+                setVideoLoadError(errorMessage);
+                dispatch({ type: 'video/fetchPlayUrl/rejected', payload: { message: errorMessage } });
+              }
+            }}
+            onStart={() => {
+              console.log('ReactPlayer onStart 被调用，视频开始加载');
+              // 清除之前的超时定时器
+              if (videoLoadTimeoutRef.current) {
+                clearTimeout(videoLoadTimeoutRef.current);
+                videoLoadTimeoutRef.current = null;
+              }
+              
+              // 重置错误状态
+              setVideoLoadError(null);
+              setVideoLoadTimeout(false);
+              
+              // 立即创建播放记录（即使进度和时长为0）
+              if (videoInfo) {
+                const videoId = videoInfo?.videoid || videoInfo?.vod_id || id;
+                const videoType = currentCategory || videoInfo.type || (selectedEpisode ? 'tv' : 'movie');
+                const isMovie = videoType === 'movies' || videoType === 'movie';
+                const episode = isMovie ? null : selectedEpisode;
+                
+                console.log('📝 onStart: 立即创建播放记录:', {
+                  id: videoId,
+                  episode,
+                  progress: 0,
+                  duration: 0,
+                  title: videoInfo.title || videoInfo.name || '未知视频',
+                  cover: videoInfo.cover_url || videoInfo.pic || '',
+                  videoType
+                });
+                
+                // 立即创建记录，即使进度和时长都是0
+                updatePlayProgress(
+                  videoId,
+                  episode,
+                  0, // 初始进度为0
+                  0, // 初始时长为0（会在后续更新）
+                  videoInfo.title || videoInfo.name || '未知视频',
+                  videoInfo.cover_url || videoInfo.pic || '',
+                  videoType
+                );
+                
+                // 重置保存时间戳，确保下次保存会在5秒后
+                lastSavedTimeRef.current = Date.now();
+              }
+              
+              // 根据视频类型设置不同的超时时间
+              // HLS 视频需要更长的加载时间
+              const isHLS = playUrl.url?.toLowerCase().includes('.m3u8') || 
+                           playUrl.url?.toLowerCase().includes('hls');
+              const timeoutDuration = isHLS ? 60000 : 30000; // HLS: 60秒, 其他: 30秒
+              
+              console.log(`设置视频加载超时: ${timeoutDuration / 1000}秒 (${isHLS ? 'HLS' : '普通视频'})`);
+              
+              // 设置加载超时
+              videoLoadTimeoutRef.current = setTimeout(() => {
+                console.warn(`视频加载超时（${timeoutDuration / 1000}秒）`);
+                // 检查视频元素是否真的没有加载
+                try {
+                  const videoElement = reactPlayerRef.current?.getInternalPlayer?.('video') || 
+                                   (playerRef.current?.wrapper?.querySelector?.('video'));
+                  if (videoElement) {
+                    const currentTime = videoElement.currentTime || 0;
+                    const readyState = videoElement.readyState || 0;
+                    
+                    console.warn('视频元素状态:', {
+                      readyState: readyState,
+                      networkState: videoElement.networkState,
+                      error: videoElement.error,
+                      src: videoElement.src,
+                      currentSrc: videoElement.currentSrc,
+                      currentTime: currentTime,
+                      paused: videoElement.paused
+                    });
+                    
+                    // 如果视频已经开始播放（currentTime > 0），说明实际上已经加载成功，只是超时检查触发
+                    if (currentTime > 0 || readyState >= 2) {
+                      console.log('视频实际上已加载成功，清除超时错误');
+                      setVideoLoadTimeout(false);
+                      setVideoLoadError(null);
+                      return;
+                    }
+                    
+                    // 如果是 HLS 视频且 readyState >= 1，可能正在加载，再等待一段时间
+                    if (playUrl.url?.includes('m3u8') && readyState >= 1) {
+                      console.log('HLS 视频可能正在加载，延长超时时间...');
+                      // 清除当前超时，设置新的超时（再等待30秒）
+                      clearTimeout(videoLoadTimeoutRef.current);
+                      videoLoadTimeoutRef.current = setTimeout(() => {
+                        setVideoLoadTimeout(true);
+                        setVideoLoadError('视频加载超时，请检查网络连接或重试');
+                      }, 30000);
+                      return;
+                    }
+                  }
+                } catch (e) {
+                  console.error('检查视频元素状态失败:', e);
+                }
+                setVideoLoadTimeout(true);
+                setVideoLoadError('视频加载超时，请检查网络连接或重试');
+              }, timeoutDuration);
+              
+              // 对于 HLS 视频，尝试手动创建 HLS 实例（如果还没有）
+              if (isHLS) {
+                setTimeout(() => {
+                  try {
+                    const videoElement = reactPlayerRef.current?.getInternalPlayer?.('video') || 
+                                       (playerRef.current?.wrapper?.querySelector?.('video'));
+                    if (videoElement && !videoElement.hls && Hls.isSupported()) {
+                      console.log('onStart: 检测到 HLS 视频但缺少实例，尝试创建...');
+                      const hls = new Hls({
+                        enableWorker: true,
+                        lowLatencyMode: true,
+                        backBufferLength: 90,
+                        maxBufferLength: 30,
+                        maxMaxBufferLength: 60,
+                        startLevel: -1,
+                        debug: false
+                      });
+                      
+                      hls.loadSource(playUrl.url);
+                      hls.attachMedia(videoElement);
+                      
+                      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                        console.log('onStart: HLS manifest 解析完成');
+                        // 等待视频元素准备好再设置播放状态
+                        // 需要等待 readyState >= 1 且至少等待 canplay 事件
+                        const waitForReady = () => {
+                          if (document.contains(videoElement) && videoElement.readyState >= 1) {
+                            console.log('onStart: HLS 视频已准备好，设置播放状态');
+                            setIsPlaying(true);
+                            // 尝试播放
+                            if (videoElement.paused && !isSeekingRef.current) {
+                              videoElement.play().catch(err => {
+                                if (err.name !== 'AbortError' || !err.message?.includes('removed from the document')) {
+                                  console.warn('onStart: HLS 播放失败:', err);
+                                }
+                              });
+                            }
+                          } else {
+                            // 等待 canplay 事件
+                            const onCanPlay = () => {
+                              if (document.contains(videoElement)) {
+                                console.log('onStart: HLS 视频可以播放，设置播放状态');
+                                setIsPlaying(true);
+                                if (videoElement.paused && !isSeekingRef.current) {
+                                  videoElement.play().catch(err => {
+                                    if (err.name !== 'AbortError' || !err.message?.includes('removed from the document')) {
+                                      console.warn('onStart: HLS 播放失败:', err);
+                                    }
+                                  });
+                                }
+                              }
+                              videoElement.removeEventListener('canplay', onCanPlay);
+                            };
+                            videoElement.addEventListener('canplay', onCanPlay, { once: true });
+                          }
+                        };
+                        setTimeout(waitForReady, 500); // 增加延迟，确保视频元素已初始化
+                      });
+                      
+                      hls.on(Hls.Events.ERROR, (event, data) => {
+                        console.error('onStart: HLS 错误:', data);
+                        if (data.fatal) {
+                          switch (data.type) {
+                            case Hls.ErrorTypes.NETWORK_ERROR:
+                              hls.startLoad();
+                              break;
+                            case Hls.ErrorTypes.MEDIA_ERROR:
+                              hls.recoverMediaError();
+                              break;
+                            default:
+                              hls.destroy();
+                              break;
+                          }
+                        }
+                      });
+                      
+                      videoElement.hls = hls;
+                    }
+                  } catch (error) {
+                    console.error('onStart: 创建 HLS 实例失败:', error);
+                  }
+                }, 500);
+              }
             }}
             onDuration={(durationValue) => {
               console.log('🔔 onDuration 回调被触发，durationValue:', durationValue);
-              if (durationValue > 0 && !isNaN(durationValue) && isFinite(durationValue)) {
-                setDuration(durationValue);
+              // 确保 durationValue 是有效数字
+              if (durationValue != null && !isNaN(durationValue) && isFinite(durationValue) && durationValue > 0) {
+                const numDuration = Number(durationValue);
+                console.log('✅ 更新视频总时长:', numDuration, '秒');
+                setDuration(numDuration);
+              } else {
+                console.warn('⚠️ onDuration 收到无效值:', durationValue, {
+                  type: typeof durationValue,
+                  isNaN: isNaN(durationValue),
+                  isFinite: isFinite(durationValue),
+                  value: durationValue
+                });
+                // 如果 durationValue 无效，尝试从视频元素获取
+                setTimeout(() => {
+                  try {
+                    const videoElement = reactPlayerRef.current?.getInternalPlayer?.('video') || 
+                                       (playerRef.current?.wrapper?.querySelector?.('video'));
+                    if (videoElement && videoElement.duration && 
+                        !isNaN(videoElement.duration) && isFinite(videoElement.duration) && 
+                        videoElement.duration > 0) {
+                      const elementDuration = Number(videoElement.duration);
+                      console.log('✅ 从视频元素获取到时长:', elementDuration, '秒');
+                      setDuration(elementDuration);
+                    }
+                  } catch (err) {
+                    console.error('从视频元素获取时长失败:', err);
+                  }
+                }, 500);
               }
             }}
             onProgress={handleProgress}
             onEnded={handleEnded}
             onPause={() => {
-              if (!isSeekingRef.current) {
+              // 检查是否是因为缓冲不足导致的暂停
+              const videoElement = reactPlayerRef.current?.getInternalPlayer?.('video') || 
+                                 (reactPlayerRef.current?.wrapper?.querySelector?.('video'));
+              const isBuffering = videoElement?._isBuffering || false;
+              
+              console.log('onPause 事件触发:', {
+                isBuffering,
+                isSeeking: isSeekingRef.current,
+                paused: videoElement?.paused,
+                readyState: videoElement?.readyState
+              });
+              
+              // 如果不是因为缓冲不足导致的暂停，且不是正在拖动进度条，才更新播放状态
+              // 但是，如果视频元素处于缓冲状态（readyState < 3），不要更新播放状态
+              if (!isSeekingRef.current && !isBuffering && videoElement && videoElement.readyState >= 3) {
                 setIsPlaying(false);
+                isPlayingRef.current = false;
+              } else if (isBuffering) {
+                // 如果是缓冲导致的暂停，保持播放状态，等待缓冲完成后恢复
+                console.log('缓冲导致的暂停，保持播放状态');
+                isPlayingRef.current = true; // 保持期望的播放状态
               }
               
-              if (videoInfo && reactPlayerRef.current && !isSeekingRef.current) {
+              if (videoInfo && reactPlayerRef.current && !isSeekingRef.current && !isBuffering) {
                 const videoType = mapVideoType(videoInfo.type || currentCategory);
-                let duration = reactPlayerRef.current.getDuration ? reactPlayerRef.current.getDuration() : 0;
-                const currentTime = reactPlayerRef.current.getCurrentTime ? reactPlayerRef.current.getCurrentTime() : playedSeconds;
                 
-                if (duration === 0 || isNaN(duration) || !isFinite(duration)) {
+                // 获取当前播放时间：优先从 ReactPlayer，其次从 state，最后从视频元素
+                let currentTime = 0;
+                try {
+                  if (reactPlayerRef.current.getCurrentTime) {
+                    currentTime = reactPlayerRef.current.getCurrentTime() || 0;
+                  }
+                } catch (err) {
+                  console.warn('从 ReactPlayer 获取当前时间失败:', err);
+                }
+                
+                // 如果获取失败，使用 state 中的值
+                if (!currentTime || currentTime === 0) {
+                  currentTime = playedSeconds || 0;
+                }
+                
+                // 如果还是 0，尝试从视频元素获取
+                if (!currentTime || currentTime === 0) {
                   try {
                     const videoElement = reactPlayerRef.current.getInternalPlayer?.('video') || 
                                        (reactPlayerRef.current.wrapper?.querySelector?.('video'));
-                    if (videoElement && videoElement.duration && !isNaN(videoElement.duration) && isFinite(videoElement.duration)) {
-                      duration = videoElement.duration;
+                    if (videoElement && videoElement.currentTime && 
+                        !isNaN(videoElement.currentTime) && isFinite(videoElement.currentTime)) {
+                      currentTime = Number(videoElement.currentTime);
                     }
-                  } catch (error) {}
+                  } catch (err) {
+                    console.warn('从视频元素获取当前时间失败:', err);
+                  }
                 }
+                
+                // 获取视频总时长：优先从 state，其次从 ReactPlayer，最后从视频元素
+                let totalDuration = duration || 0;
+                
+                if (!totalDuration || totalDuration === 0) {
+                  try {
+                    if (reactPlayerRef.current.getDuration) {
+                      const refDuration = reactPlayerRef.current.getDuration();
+                      if (refDuration && refDuration > 0 && !isNaN(refDuration) && isFinite(refDuration)) {
+                        totalDuration = Number(refDuration);
+                      }
+                    }
+                  } catch (err) {
+                    console.warn('从 ReactPlayer 获取时长失败:', err);
+                  }
+                }
+                
+                if (!totalDuration || totalDuration === 0) {
+                  try {
+                    const videoElement = reactPlayerRef.current.getInternalPlayer?.('video') || 
+                                       (reactPlayerRef.current.wrapper?.querySelector?.('video'));
+                    if (videoElement && videoElement.duration && 
+                        !isNaN(videoElement.duration) && isFinite(videoElement.duration) && 
+                        videoElement.duration > 0) {
+                      totalDuration = Number(videoElement.duration);
+                    }
+                  } catch (err) {
+                    console.warn('从视频元素获取时长失败:', err);
+                  }
+                }
+                
+                // 如果还是 0，尝试从已保存的记录中获取
+                if (!totalDuration || totalDuration === 0) {
+                  const existingRecord = getVideoPlayHistory(id);
+                  if (existingRecord && existingRecord.duration && existingRecord.duration > 0) {
+                    totalDuration = Number(existingRecord.duration);
+                    console.log('从已保存记录获取时长:', totalDuration);
+                  }
+                }
+                
+                console.log('onPause: 获取到的播放信息:', {
+                  currentTime,
+                  totalDuration,
+                  playedSeconds,
+                  duration,
+                  hasReactPlayer: !!reactPlayerRef.current
+                });
                 
                 if (currentTime > 0) {
                   updatePlayProgress(
                     id,
                     selectedEpisode,
                     currentTime,
-                    duration > 0 && !isNaN(duration) && isFinite(duration) ? duration : 0,
+                    totalDuration > 0 && !isNaN(totalDuration) && isFinite(totalDuration) ? totalDuration : 0,
                     videoInfo.title || videoInfo.name || '未知视频',
                     videoInfo.cover_url || videoInfo.pic || '',
                     videoType

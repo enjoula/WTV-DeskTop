@@ -2,7 +2,9 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useDispatch, useSelector } from 'react-redux';
-import { loginUser } from '../store/authSlice';
+import { loginUser, fetchCurrentUser } from '../store/authSlice';
+import { fetchMovies, fetchTVShows, fetchAnime } from '../store/videoSlice';
+import { fetchFavorites } from '../store/favoriteSlice';
 
 const Login = () => {
   const [username, setUsername] = useState('');
@@ -13,14 +15,32 @@ const Login = () => {
 
   useEffect(() => {
     if (isAuthenticated) {
+      // 登录成功后，刷新视频列表数据
+      console.log('登录成功，刷新视频列表数据...');
+      dispatch(fetchMovies({ page: 1, size: 10 }));
+      dispatch(fetchTVShows({ page: 1, size: 10 }));
+      dispatch(fetchAnime({ page: 1, size: 10 }));
+      // 获取用户信息和收藏列表
+      dispatch(fetchCurrentUser());
+      dispatch(fetchFavorites());
+      
+      // 延迟跳转，确保数据已刷新
+      setTimeout(() => {
       navigate('/');
+      }, 100);
     }
-  }, [isAuthenticated, navigate]);
+  }, [isAuthenticated, navigate, dispatch]);
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
     // device参数会在API层自动检测，无需手动传递
-    dispatch(loginUser({ username, password }));
+    const result = await dispatch(loginUser({ username, password }));
+    
+    // 登录成功后，立即获取用户信息
+    if (result.type === 'auth/loginUser/fulfilled') {
+      dispatch(fetchCurrentUser());
+      dispatch(fetchFavorites());
+    }
   };
 
   const handleRegisterRedirect = () => {

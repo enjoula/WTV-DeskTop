@@ -263,7 +263,7 @@ function App() {
         // 延迟检查更新，避免影响应用启动速度
         const timer = setTimeout(() => {
           handleCheckUpdate(versionCode, platform);
-        }, 2000); // 2秒后检查更新
+        }, 5 * 60 * 1000); // 应用启动后5分钟检查更新
         
         return () => clearTimeout(timer);
       } else {
@@ -388,6 +388,12 @@ function App() {
                   <div>download_url: {updateInfo.download_url ? '有' : '无'}</div>
                 </>
               )}
+            </div>
+          )}
+          {/* 全局版本号展示（右下角） */}
+          {version && (
+            <div className="app-version-badge">
+              V{version}
             </div>
           )}
         </div>

@@ -15,6 +15,7 @@ const Home = () => {
     console.log('Redux state 更新:', state);
     return state.video;
   });
+  const { isAuthenticated } = useSelector(state => state.auth);
 
   // 检查是否从注册页面跳转过来
   useEffect(() => {
@@ -35,7 +36,7 @@ const Home = () => {
 
   useEffect(() => {
     console.log('首页组件挂载，开始获取视频列表数据...');
-    console.log('当前Redux状态:', { movies, tvShows, anime });
+    console.log('当前Redux状态:', { movies, tvShows, anime, isAuthenticated });
     
     // 只在数据不存在且不在加载中时获取，避免重复调用
     if ((!movies.data || movies.data.length === 0) && !movies.loading) {
@@ -67,7 +68,7 @@ const Home = () => {
         console.error('动漫列表获取失败:', error);
       });
     }
-  }, [dispatch]); // 移除数据依赖，只在组件挂载时调用一次
+  }, [dispatch, isAuthenticated]); // 添加 isAuthenticated 依赖，登录状态变化时重新获取数据
 
   // 添加渲染调试信息
   console.log('Home组件渲染，movies数据:', movies);

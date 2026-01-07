@@ -23,6 +23,7 @@ const VideoList = () => {
   const [page, setPage] = useState(1);
   const [activeFilters, setActiveFilters] = useState({});
   const { movies, tvShows, anime, varietyShows, documentaries, filterResults } = useSelector(state => state.video);
+  const { isAuthenticated } = useSelector(state => state.auth);
   const loadingRef = useRef(false); // 防止重复加载
   const observerTarget = useRef(null); // Intersection Observer 的目标元素
   
@@ -94,7 +95,7 @@ const VideoList = () => {
     };
     
     fetchData(1);
-  }, [category, dispatch]);
+  }, [category, dispatch, isAuthenticated]); // 添加 isAuthenticated 依赖，登录状态变化时重新获取数据
   
   // 懒加载：加载更多数据
   const loadMore = useCallback(() => {
