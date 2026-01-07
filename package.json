@@ -11,7 +11,9 @@
     "electron-dev": "nodemon --exec electron . --watch src/main",
     "build": "electron-builder",
     "pack": "electron-builder --dir",
-    "dist": "electron-builder",
+    "dist": "electron-builder --mac --win",
+    "dist:mac": "electron-builder --mac",
+    "dist:win": "electron-builder --win",
     "build:all": "node build-all.js",
     "build:mac": "node build-all.js --mac-only",
     "build:win": "node build-all.js --win-only",
@@ -39,7 +41,7 @@
     "appId": "com.wtv.app",
     "productName": "WTV",
     "directories": {
-      "output": "dist/windows"
+      "output": "dist"
     },
     "icon": "build/icons/icon.png",
     "files": [
