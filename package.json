@@ -48,7 +48,7 @@
     "productName": "WTV",
     "afterPack": "build/fix-mac-helper-visibility.js",
     "directories": {
-      "output": "dist"
+      "output": "dist/windows"
     },
     "icon": "build/icons/icon.png",
     "files": [
