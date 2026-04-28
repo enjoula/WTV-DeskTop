@@ -15,8 +15,8 @@ console.error = (...args) => {
     combined.includes('Unknown event handler property `onDuration`') ||
     combined.includes('Unknown event handler property `onSeek`') ||
     combined.includes('Unknown event handler property `onSeeked`') ||
-    combined.includes('Unknown event handler property') && combined.includes('onDuration') ||
-    combined.includes('Unknown event handler property') && combined.includes('onSeek')
+    (combined.includes('Unknown event handler property') && combined.includes('onDuration')) ||
+    (combined.includes('Unknown event handler property') && combined.includes('onSeek'))
   ) {
     return;
   }

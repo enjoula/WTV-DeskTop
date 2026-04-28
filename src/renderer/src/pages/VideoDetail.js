@@ -84,9 +84,10 @@ const VideoDetail = () => {
   const [videoLoadError, setVideoLoadError] = useState(null); // 视频加载错误
   const [videoLoadTimeout, setVideoLoadTimeout] = useState(false); // 视频加载超时
   const [videoFitMode, setVideoFitMode] = useState(() => {
-    // 从 localStorage 读取用户选择的显示模式，默认为 contain（16:9）
-    const saved = localStorage.getItem('wtv_video_fit_mode');
-    return saved || 'contain'; // contain: 16:9, cover: 裁剪, fill: 填充, none: 原比例
+    // 优先从统一播放器设置读取，兼容旧版本单独存储键
+    const fromSettings = playerSettings.videoFitMode;
+    const savedLegacy = localStorage.getItem('wtv_video_fit_mode');
+    return fromSettings || savedLegacy || 'contain'; // contain: 16:9, cover: 裁剪, fill: 填充, none: 原比例
   }); // 视频显示模式：contain(16:9), cover(裁剪), fill(填充), none(原比例)
   const [isPictureInPicture, setIsPictureInPicture] = useState(false); // 画中画状态
   const [isFullscreen, setIsFullscreen] = useState(false); // 全屏状态
@@ -529,7 +530,7 @@ const VideoDetail = () => {
     // 使用用户设置的自动播放偏好，而不是硬编码 false
     setIsPlaying(playerSettings.autoplay);
     hasSkippedRef.current = false; // 重置快进状态
-  }, [id]);
+  }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 监听视频显示模式变化，应用到视频元素
   useEffect(() => {
@@ -561,7 +562,7 @@ const VideoDetail = () => {
     // 延迟应用，确保视频元素已渲染
     const timer = setTimeout(applyVideoFitMode, 100);
     return () => clearTimeout(timer);
-  }, [videoFitMode, playerReady]);
+  }, [videoFitMode, playerReady]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 监听画中画状态变化
   useEffect(() => {
@@ -675,7 +676,7 @@ const VideoDetail = () => {
         dispatch(selectQuality(savedQuality));
       }
     }
-  }, [playUrl.qualityOptions, playUrl.selectedQuality, dispatch]);
+  }, [playUrl.qualityOptions, playUrl.selectedQuality, dispatch]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 当电影播放时，锁定主内容区域滚动，避免播放过程中页面滑动
   useEffect(() => {
@@ -736,7 +737,7 @@ const VideoDetail = () => {
       dispatch(clearPlayUrl());
       dispatch(clearEpisodes());
     };
-  }, [dispatch]);
+  }, [dispatch]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 当电影真正开始播放且播放器就绪时，将滚动容器平滑滚动到播放器上方 10px 处
   useEffect(() => {
@@ -805,7 +806,7 @@ const VideoDetail = () => {
         }
       }
     }
-  }, [selectedEpisode, episodes.data, activeSeason]);
+  }, [selectedEpisode, episodes.data, activeSeason]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // MyArtPlayer 已内置 HLS 处理，以下手动注入逻辑已禁用
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1118,7 +1119,7 @@ const VideoDetail = () => {
         clearTimeout(timer2);
       };
     }
-  }, [isMoviePlaying, isEpisodePlaying, playUrl.url, playUrl.loading, playUrl.error, playerReady]);
+  }, [isMoviePlaying, isEpisodePlaying, playUrl.url, playUrl.loading, playUrl.error, playerReady]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     // 如果从搜索页面跳转过来，需要根据视频信息设置 currentCategory
@@ -1230,7 +1231,7 @@ const VideoDetail = () => {
         console.error('清理视频元素事件监听器失败:', err);
       }
     };
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 注意：executeAutoPlayFromHistory 函数已移到 handleMoviePlay 之后，以避免变量初始化顺序问题
   // 使用 executeAutoPlayFromHistory 的 useEffect 也移到该函数定义之后
@@ -1283,6 +1284,7 @@ const VideoDetail = () => {
     return false;
   }, [buildLoginRedirectState, isAuthenticated, navigate]);
 
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   const handlePlay = async (episodeNumber, options = {}) => {
     const { skipLoginCheck = false, fromAutoNext = false } = options;
     wtvPlayLog('play.request', {
@@ -2007,6 +2009,7 @@ const VideoDetail = () => {
     }
     showCenterTip(`正在播放第${nextEpisodeNumber}集`);
     handlePlay(nextEpisodeNumber, { skipLoginCheck: true });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [getNextEpisodeNumber, handlePlay]);
 
   const toggleAutoNextEpisode = useCallback((options = {}) => {
@@ -2683,7 +2686,7 @@ const VideoDetail = () => {
         }
       }, 300);
     }
-  }, [videoInfo, episodes.data, selectedEpisode, isMoviePlaying, isEpisodePlaying, handlePlay, handlePlayFromTime, handleMoviePlay, playerRefInternal, playerRef, setIsPlaying]);
+  }, [videoInfo, episodes.data, selectedEpisode, isMoviePlaying, isEpisodePlaying, handlePlay, handlePlayFromTime, handleMoviePlay, playerRefInternal, playerRef, setIsPlaying]); // eslint-disable-line react-hooks/exhaustive-deps
   
   // 从播放记录跳转时，自动选择对应的集数并开始播放
   // 注意：此 useEffect 必须在 executeAutoPlayFromHistory 定义之后
@@ -2926,7 +2929,31 @@ const VideoDetail = () => {
   const handleVideoFitModeChange = useCallback((mode) => {
     setVideoFitMode(mode);
     localStorage.setItem('wtv_video_fit_mode', mode);
+    updatePlayerSetting('videoFitMode', mode);
   }, []);
+
+  // 统一持久化播放设置：确保关闭前最后状态可恢复
+  useEffect(() => {
+    const persistSettings = () => {
+      updatePlayerSetting('volume', volume);
+      updatePlayerSetting('muted', muted);
+      updatePlayerSetting('playbackRate', playbackRate);
+      updatePlayerSetting('videoFitMode', videoFitMode);
+      updatePlayerSetting('autoNextEpisode', autoNextEpisode);
+    };
+
+    // 状态变化时持久化一份，避免异常退出丢失设置
+    persistSettings();
+
+    // 关闭窗口/刷新时再落盘一次，保证“最后一次”设置生效
+    window.addEventListener('beforeunload', persistSettings);
+    window.addEventListener('pagehide', persistSettings);
+    return () => {
+      window.removeEventListener('beforeunload', persistSettings);
+      window.removeEventListener('pagehide', persistSettings);
+      persistSettings();
+    };
+  }, [volume, muted, playbackRate, videoFitMode, autoNextEpisode]);
 
   // 处理点击推荐视频，在新窗口打开视频详情页
   const handleRelatedVideoClick = (e, video) => {

@@ -14,6 +14,7 @@ import { setPlaylist } from './store/videoSlice';
 import './App.css';
 
 function App() {
+  const appLaunchTimestampRef = React.useRef(Date.now());
   const [version, setVersion] = React.useState(null);
   const [versionCode, setVersionCode] = React.useState(null);
   const [platform, setPlatform] = React.useState(null);
@@ -44,32 +45,9 @@ function App() {
     onExtra: null,
   });
 
-  // 检查今天是否已经提醒过非强制更新
-  const shouldShowNonForceUpdateToday = React.useCallback((isForce) => {
-    // 强制更新：每次检测到都要提示
-    if (isForce) {
-      console.log('强制更新，需要立即提示');
-      return true;
-    }
-    
-    // 非强制更新：检查今天是否已经提醒过
-    const today = new Date().toDateString(); // 获取今天的日期字符串，例如 "Mon Jan 01 2024"
-    const lastRemindDate = localStorage.getItem('lastNonForceUpdateRemindDate');
-    
-    // 如果今天还没有提醒过，返回 true
-    if (lastRemindDate !== today) {
-      // 更新最后提醒日期
-      localStorage.setItem('lastNonForceUpdateRemindDate', today);
-      console.log('今天首次检测到非强制更新，需要提示');
-      return true;
-    }
-    
-    console.log('今天已经提醒过非强制更新，跳过提示');
-    return false;
-  }, []);
-
   // 后台静默下载更新
   const handleBackgroundDownload = React.useCallback(async (downloadUrl, fileName) => {
+    const maxRetryAttempts = 3;
     if (!window.electronAPI || !window.electronAPI.downloadUpdate) {
       console.error('下载 API 不可用');
       setDownloadState('error');
@@ -88,22 +66,34 @@ function App() {
       setTotalBytes(0);
       setDownloadErrorMessage(null);
 
-      console.log('开始后台静默下载更新文件:', downloadUrl);
-      const result = await window.electronAPI.downloadUpdate(downloadUrl, fileName);
+      let lastError = null;
+      for (let attempt = 1; attempt <= maxRetryAttempts; attempt += 1) {
+        try {
+          console.log(`开始后台静默下载更新文件（第 ${attempt}/${maxRetryAttempts} 次）:`, downloadUrl);
+          const result = await window.electronAPI.downloadUpdate(downloadUrl, fileName);
 
-      if (result.success) {
-        setDownloadState('completed');
-        setDownloadedFilePath(result.filePath);
-        setDownloadProgress(100);
-        console.log('后台下载完成，文件路径:', result.filePath);
-        // 🔧 下载完成后，由 useEffect 自动显示弹窗
-      } else {
-        throw new Error('下载失败');
+          if (result.success) {
+            setDownloadState('completed');
+            setDownloadedFilePath(result.filePath);
+            setDownloadProgress(100);
+            console.log('后台下载完成，文件路径:', result.filePath);
+            // 🔧 下载完成后，由 useEffect 自动显示弹窗
+            return;
+          }
+          throw new Error('下载失败');
+        } catch (attemptError) {
+          lastError = attemptError;
+          console.error(`后台下载第 ${attempt} 次失败:`, attemptError);
+          if (attempt < maxRetryAttempts) {
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+          }
+        }
       }
+      throw lastError || new Error('下载失败');
     } catch (error) {
       console.error('后台下载失败:', error);
       setDownloadState('error');
-      setDownloadErrorMessage(error.message || '下载失败，请重试');
+      setDownloadErrorMessage(error.message || `下载失败，已重试 ${maxRetryAttempts} 次`);
       // 🔧 下载失败时，只有强制更新才显示弹窗
       // 非强制更新不显示，避免影响用户体验
     }
@@ -253,7 +243,7 @@ function App() {
       console.error('检查更新失败:', error);
       console.error('错误详情:', error.response?.data || error.message);
     }
-  }, [shouldShowNonForceUpdateToday, handleBackgroundDownload]);
+  }, [handleBackgroundDownload]);
 
   // 全局登录弹窗显示方法
   React.useEffect(() => {
@@ -386,14 +376,28 @@ function App() {
     console.log('当前路径:', window.location.href);
   }, []);
 
-  // 当 versionCode 和 platform 都获取到后，检查更新（应用启动后2分钟）
+  // 当 versionCode 和 platform 都获取到后，检查更新（应用启动后0.5-1.5分钟内）
   React.useEffect(() => {
     if (versionCode && platform) {
-        // 延迟检查更新，避免影响应用启动速度
+        // 以“应用启动时刻”为基准，在 30~90 秒窗口内随机选择一次检测时间
+        const minSinceLaunchMs = 30 * 1000; // 0.5 分钟
+        const maxSinceLaunchMs = 90 * 1000; // 1.5 分钟
+        const targetSinceLaunchMs =
+          Math.floor(Math.random() * (maxSinceLaunchMs - minSinceLaunchMs + 1)) + minSinceLaunchMs;
+        const elapsedSinceLaunchMs = Date.now() - appLaunchTimestampRef.current;
+        const remainingDelayMs = Math.max(targetSinceLaunchMs - elapsedSinceLaunchMs, 0);
+        const delaySeconds = Math.round(remainingDelayMs / 1000);
+
         const timer = setTimeout(() => {
-        console.log('应用启动后2分钟，开始检查更新');
+        console.log(`应用启动后 ${Math.round((Date.now() - appLaunchTimestampRef.current) / 1000)} 秒，开始检查更新`);
           handleCheckUpdate(versionCode, platform);
-      }, 2 * 60 * 1000); // 应用启动后2分钟检查更新
+      }, remainingDelayMs);
+
+        console.log('更新检测已计划：', {
+          targetSinceLaunchSeconds: Math.round(targetSinceLaunchMs / 1000),
+          elapsedSinceLaunchSeconds: Math.round(elapsedSinceLaunchMs / 1000),
+          remainingDelaySeconds: delaySeconds
+        });
         
         return () => clearTimeout(timer);
     }
@@ -473,6 +477,7 @@ function App() {
             <UpdateDialog
               updateInfo={updateInfo}
               isForce={isForceUpdate}
+              appPlatform={platform}
               onClose={handleCloseUpdateDialog}
               onDownload={handleDownload}
               downloadState={downloadState}

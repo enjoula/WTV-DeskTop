@@ -1,5 +1,5 @@
 // pages/Favorites.js
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useEffect, useRef, useCallback } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { Link, useNavigate } from 'react-router-dom';
 import { fetchFavorites } from '../store/favoriteSlice';
@@ -13,14 +13,12 @@ const Favorites = () => {
   const dispatch = useDispatch();
   const navigate = useNavigate();
   const { favorites } = useSelector(state => state.favorite);
-  const [page, setPage] = useState(1);
   const loadingRef = useRef(false); // 防止重复加载
   const observerTarget = useRef(null); // Intersection Observer 的目标元素
 
   useEffect(() => {
     // 获取收藏列表
     dispatch(fetchFavorites({ page: 1, size: 20 })); // 初始加载第一页
-    setPage(1);
   }, [dispatch]);
 
   // 懒加载：加载更多数据
@@ -108,7 +106,6 @@ const Favorites = () => {
           showCenterTip('收藏成功');
         }
       // 重新获取收藏列表，从第一页开始
-      setPage(1);
       dispatch(fetchFavorites({ page: 1, size: 20 }));
       } else if (code === 401) {
         // 401：账号在其他设备登录

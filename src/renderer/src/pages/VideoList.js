@@ -10,7 +10,6 @@ import {
   fetchDocumentaries,
   filterVideoList,
   setCurrentCategory,
-  clearCategoryData,
 } from '../store/videoSlice';
 import FilterPanel from '../components/FilterPanel';
 import VideoImage from '../components/VideoImage';
@@ -39,7 +38,6 @@ const VideoList = () => {
   });
   const [activeFilters, setActiveFilters] = useState({});
   const { movies, tvShows, anime, varietyShows, documentaries, filterResults } = useSelector(state => state.video);
-  const { isAuthenticated } = useSelector(state => state.auth);
   const loadingRef = useRef(false); // 防止重复加载
   const observerInstance = useRef(null); // Intersection Observer 实例
   const categoryFetchedRef = useRef(null); // 记录已获取的分类，防止重复调用
@@ -324,7 +322,7 @@ const VideoList = () => {
     fetchPromise.finally(() => {
       loadingRef.current = false;
     });
-  }, [category, page, categoryData, activeFilters, filterResults, dispatch]);
+  }, [category, page, categoryData, activeFilters, filterResults, dispatch, pageStorageKey]);
 
   // 始终保持 loadMore 最新引用，避免 Observer 闭包捕获过期值
   const loadMoreRef = useRef(loadMore);

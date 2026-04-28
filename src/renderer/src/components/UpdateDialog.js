@@ -7,6 +7,7 @@ const UpdateDialog = ({
   onClose, 
   onDownload, 
   isForce,
+  appPlatform = '',
   downloadState: externalDownloadState = 'idle',
   downloadedFilePath: externalDownloadedFilePath = null,
   downloadProgress: externalDownloadProgress = 0,
@@ -16,6 +17,7 @@ const UpdateDialog = ({
   downloadErrorMessage: externalDownloadErrorMessage = null,
   onRetryDownload = null
 }) => {
+  const MAX_DOWNLOAD_RETRY = 3;
   // 用于控制滚动提示的显示
   const [showScrollHint, setShowScrollHint] = React.useState(true);
   const contentRef = React.useRef(null);
@@ -38,6 +40,11 @@ const UpdateDialog = ({
   const downloadSpeed = externalDownloadState !== 'idle' ? externalDownloadSpeed : internalDownloadSpeed;
   const downloadedFilePath = externalDownloadedFilePath || internalDownloadedFilePath;
   const errorMessage = externalDownloadErrorMessage || internalErrorMessage;
+  const versionText = updateInfo?.version_name ? `V${updateInfo.version_name}` : '';
+
+  const platformLower = String(appPlatform || '').toLowerCase();
+  const isMacTheme = platformLower.includes('mac') || platformLower.includes('darwin');
+  const platformThemeClass = isMacTheme ? 'mac-theme' : 'win-theme';
   
   // 调试日志
   React.useEffect(() => {
@@ -99,40 +106,6 @@ const UpdateDialog = ({
         const isAtTop = contentElement.scrollTop === 0;
         // 只有在可滚动且位于顶部时才显示提示
         setShowScrollHint(isScrollable && isAtTop);
-        
-        // 更新遮罩显示状态
-        let wrapper = null;
-        try {
-          if (contentElement.parentElement) {
-            // 尝试找到父容器
-            const parent = contentElement.parentElement;
-            if (parent && parent.classList) {
-              if (parent.classList.contains('update-dialog-content-wrapper') || 
-                  parent.classList.contains('update-force-content-wrapper')) {
-                wrapper = parent;
-              } else if (parent.closest) {
-                // 如果直接父元素不是，尝试向上查找
-                wrapper = parent.closest('.update-dialog-content-wrapper, .update-force-content-wrapper');
-              }
-            }
-          }
-          
-          if (wrapper) {
-            const topIndicator = wrapper.querySelector('.update-content-scroll-indicator-top');
-            const bottomIndicator = wrapper.querySelector('.update-content-scroll-indicator-bottom');
-            
-            if (topIndicator && bottomIndicator) {
-              // 顶部遮罩：不在顶部时显示
-              const showTopIndicator = contentElement.scrollTop > 10;
-              topIndicator.style.opacity = showTopIndicator ? '1' : '0';
-              // 底部遮罩：未滚动到底部时显示
-              const isAtBottom = contentElement.scrollHeight - contentElement.scrollTop <= contentElement.clientHeight + 10;
-              bottomIndicator.style.opacity = isAtBottom ? '0' : '1';
-            }
-          }
-        } catch (domError) {
-          console.warn('更新滚动遮罩时出错:', domError);
-        }
       } catch (error) {
         console.error('检查滚动状态时出错:', error);
       }
@@ -216,21 +189,32 @@ const UpdateDialog = ({
       const url = new URL(updateInfo.download_url);
       const fileName = url.pathname.split('/').pop() || `update-${updateInfo.version_name || Date.now()}.exe`;
 
-      console.log('开始下载更新文件:', updateInfo.download_url);
-      const result = await window.electronAPI.downloadUpdate(updateInfo.download_url, fileName);
-
-      if (result.success) {
-        setInternalDownloadState('completed');
-        setInternalDownloadedFilePath(result.filePath);
-        setInternalDownloadProgress(100);
-        console.log('下载完成，文件路径:', result.filePath);
-      } else {
-        throw new Error('下载失败');
+      let lastError = null;
+      for (let attempt = 1; attempt <= MAX_DOWNLOAD_RETRY; attempt += 1) {
+        try {
+          console.log(`开始下载更新文件（第 ${attempt}/${MAX_DOWNLOAD_RETRY} 次）:`, updateInfo.download_url);
+          const result = await window.electronAPI.downloadUpdate(updateInfo.download_url, fileName);
+          if (result.success) {
+            setInternalDownloadState('completed');
+            setInternalDownloadedFilePath(result.filePath);
+            setInternalDownloadProgress(100);
+            console.log('下载完成，文件路径:', result.filePath);
+            return;
+          }
+          throw new Error('下载失败');
+        } catch (attemptError) {
+          lastError = attemptError;
+          console.error(`第 ${attempt} 次下载失败:`, attemptError);
+          if (attempt < MAX_DOWNLOAD_RETRY) {
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+          }
+        }
       }
+      throw lastError || new Error('下载失败');
     } catch (error) {
       console.error('下载失败:', error);
       setInternalDownloadState('error');
-      setInternalErrorMessage(error.message || '下载失败，请重试');
+      setInternalErrorMessage(error.message || `下载失败，已重试 ${MAX_DOWNLOAD_RETRY} 次`);
     }
   };
 
@@ -296,10 +280,10 @@ const UpdateDialog = ({
   if (!isForce) {
     return (
       <div 
-        className="update-dialog-overlay" 
+        className={`update-dialog-overlay ${platformThemeClass}`}
         onClick={handleOverlayClick}
       >
-        <div className="update-dialog update-dialog-new" onClick={(e) => e.stopPropagation()}>
+        <div className={`update-dialog update-dialog-new ${platformThemeClass}`} onClick={(e) => e.stopPropagation()}>
           {/* (A) 关闭按钮 */}
           <button 
             className="update-dialog-close" 
@@ -309,19 +293,20 @@ const UpdateDialog = ({
             ×
           </button>
 
-          {/* (B) 顶部插画区域 */}
-          <div className="update-dialog-illustration">
-            <div className="update-illustration-content">
-              <div className="update-illustration-astronaut">👨‍🚀</div>
-              <div className="update-illustration-gift">🎁</div>
+          <div className="update-dialog-header-row">
+            {/* (B) 顶部插画区域 */}
+            <div className="update-dialog-illustration">
+              <div className="update-illustration-content">
+                <div className="update-illustration-update-icon">⬆️</div>
+              </div>
             </div>
-          </div>
 
-          {/* (C) 标题 */}
-          <div className="update-dialog-title-new">
-            <h2>
-              {downloadState === 'completed' ? '更新已准备就绪' : '发现新版本'} {updateInfo.version_name || ''}
-            </h2>
+            {/* (C) 标题 */}
+            <div className="update-dialog-title-new">
+              <h2>
+                {versionText ? `${versionText} ` : ''}{downloadState === 'completed' ? '更新已准备就绪' : '发现新版本'}
+              </h2>
+            </div>
           </div>
 
           {/* (D) 更新内容区域 - 使用接口返回的 update_content */}
@@ -334,11 +319,8 @@ const UpdateDialog = ({
                   </div>
                 ))}
               </div>
-              {/* 滚动提示遮罩 */}
-              <div className="update-content-scroll-indicator-top"></div>
-              <div className="update-content-scroll-indicator-bottom"></div>
-              {/* 滚动提示文字 */}
-              {showScrollHint && (
+              {/* 滚动提示文字（下载完成后不再显示，避免遮挡完成态信息） */}
+              {showScrollHint && downloadState !== 'completed' && (
                 <div className="update-content-scroll-hint">
                   <span className="scroll-hint-icon">↓</span>
                   <span className="scroll-hint-text">滚动查看更多</span>
@@ -347,18 +329,6 @@ const UpdateDialog = ({
             </div>
           )}
 
-          {/* (E & F) 按钮区域 - 只在下载完成后显示 */}
-          {downloadState === 'completed' && (
-          <div className="update-dialog-actions-new">
-            <button className="update-button-secondary" onClick={onClose}>
-              稍后安装
-            </button>
-              <button className="update-button-primary" onClick={handleInstall}>
-              立即安装
-            </button>
-          </div>
-          )}
-          
           {/* 下载进度区域 */}
           {downloadState === 'downloading' && (
             <div className="update-download-progress">
@@ -384,9 +354,10 @@ const UpdateDialog = ({
           {/* 下载完成区域 */}
           {downloadState === 'completed' && (
             <div className="update-download-completed">
-              <div className="update-completed-icon">✓</div>
-              <div className="update-completed-message">下载完成</div>
               <div className="update-dialog-actions-new">
+                <button className="update-button-secondary" onClick={onClose}>
+                  稍后安装
+                </button>
                 <button className="update-button-primary" onClick={handleInstall}>
                   立即安装
                 </button>
@@ -427,10 +398,10 @@ const UpdateDialog = ({
 
   return (
     <div 
-      className="update-dialog-overlay force-update" 
+      className={`update-dialog-overlay force-update ${platformThemeClass}`}
       onClick={handleOverlayClick}
     >
-      <div className="update-dialog update-dialog-force" onClick={(e) => e.stopPropagation()}>
+      <div className={`update-dialog update-dialog-force ${platformThemeClass}`} onClick={(e) => e.stopPropagation()}>
         {/* (A) 红色警告图标 */}
         <div className="update-force-icon">
           <div className="update-force-icon-circle">

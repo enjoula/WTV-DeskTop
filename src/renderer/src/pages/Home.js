@@ -21,7 +21,6 @@ const Home = () => {
     console.log('Redux state 更新:', state);
     return state.video;
   });
-  const { isAuthenticated } = useSelector(state => state.auth);
   const fetchingRef = useRef({ movies: false, tvShows: false, anime: false }); // 防止同时发起多个请求
 
   // 检查是否从注册页面跳转过来
@@ -119,6 +118,7 @@ const Home = () => {
         globalFetched: window.__homeDataFetched.anime
       });
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dispatch]); // 只依赖 dispatch，避免因数据变化导致重复调用
 
   // 添加渲染调试信息

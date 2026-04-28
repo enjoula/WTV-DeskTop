@@ -131,7 +131,6 @@ apiClient.interceptors.response.use(
     // 处理网络错误（Windows 平台常见问题）
     if (!error.response) {
       // 没有响应，可能是网络连接问题
-      const errorMessage = error.message || '网络错误';
       const isNetworkError = error.code === 'ECONNREFUSED' || 
                            error.code === 'ENOTFOUND' || 
                            error.code === 'ETIMEDOUT' ||

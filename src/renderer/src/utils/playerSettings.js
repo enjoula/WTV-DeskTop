@@ -8,6 +8,7 @@ const DEFAULT_SETTINGS = {
   volume: 0.75, // 默认音量75%
   playbackRate: 1, // 默认播放速度1x
   muted: false, // 默认不静音
+  videoFitMode: 'contain', // 默认显示模式（16:9）
   selectedQuality: '', // 默认画质（空表示自动）
   autoplay: true, // 默认自动播放
   autoNextEpisode: true, // 默认开启非电影自动连播下一集

@@ -67,15 +67,6 @@ function readSkipConfig(videoId) {
   }
 }
 
-function saveSkipConfig(videoId, config) {
-  if (!videoId) return;
-  try {
-    const all = JSON.parse(localStorage.getItem(SKIP_CONFIGS_KEY) || '{}');
-    all[String(videoId)] = config;
-    localStorage.setItem(SKIP_CONFIGS_KEY, JSON.stringify(all));
-  } catch (_) { /* ignore */ }
-}
-
 // 格式化秒数为 m:ss，用于 ArtPlayer notice 提示
 function formatSkipTime(seconds) {
   if (!seconds || isNaN(seconds)) return '0:00';
@@ -840,6 +831,7 @@ const MyArtPlayer = forwardRef(({
         artInstanceRef.current = null;
       }
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [url, blockAdEnabled]); // ← blockAdEnabled 变化时重建播放器（与 LunaTV 一致）
 
   // 同步播放状态

@@ -11,7 +11,7 @@ const Login = () => {
   const dispatch = useDispatch();
   const navigate = useNavigate();
   const location = useLocation();
-  const { loading, error, isAuthenticated } = useSelector(state => state.auth);
+  const { loading, error, isAuthenticated, user } = useSelector(state => state.auth);
 
   useEffect(() => {
     if (isAuthenticated) {
@@ -20,8 +20,10 @@ const Login = () => {
       dispatch(fetchMovies({ page: 1, size: 10 }));
       dispatch(fetchTVShows({ page: 1, size: 10 }));
       dispatch(fetchAnime({ page: 1, size: 10 }));
-      // 获取用户信息
-      dispatch(fetchCurrentUser());
+      // 获取用户信息（仅在缺失时请求，避免重复调用 /user/me）
+      if (!user) {
+        dispatch(fetchCurrentUser());
+      }
       // 不再自动获取收藏列表，只在用户进入收藏列表页面时获取
 
       // 登录成功后优先回到来源页面（如视频详情页），否则回首页
@@ -47,16 +49,15 @@ const Login = () => {
         navigate(redirectTarget, { replace: true });
       }, 100);
     }
-  }, [isAuthenticated, navigate, dispatch, location.state]);
+  }, [isAuthenticated, user, navigate, dispatch, location.state]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     // device参数会在API层自动检测，无需手动传递
     const result = await dispatch(loginUser({ username, password }));
     
-    // 登录成功后，立即获取用户信息
+    // 登录后用户信息由上面的 useEffect 统一处理，避免重复请求 /user/me
     if (result.type === 'auth/loginUser/fulfilled') {
-      dispatch(fetchCurrentUser());
       // 不再自动获取收藏列表，只在用户进入收藏列表页面时获取
     }
   };

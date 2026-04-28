@@ -11,6 +11,7 @@
   z-index: 10000;
   /* 强制更新时，确保对话框始终在最前面 */
   pointer-events: auto;
+  overscroll-behavior: contain; /* 阻止滚动穿透到背景页面 */
 }
 
 /* 强制更新时，遮罩层更暗，完全阻止用户操作 */
@@ -229,10 +230,18 @@
 }
 
 /* (B) 顶部插画区域 */
+.update-dialog-header-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 16px 0;
+}
+
 .update-dialog-illustration {
-  width: 100%;
-  height: 120px;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  width: 140px;
+  flex: 0 0 140px;
+  height: 84px;
+  background: transparent;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -241,28 +250,24 @@
 }
 
 .update-illustration-content {
-  position: relative;
-  width: 200px;
-  height: 200px;
+  width: 100%;
+  height: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
-.update-illustration-astronaut {
-  font-size: 80px;
+.update-illustration-update-icon {
+  width: 56px;
+  height: 56px;
+  border-radius: 16px;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 30px;
+  line-height: 1;
   animation: float 3s ease-in-out infinite;
-  position: relative;
-  z-index: 2;
-}
-
-.update-illustration-gift {
-  font-size: 60px;
-  position: absolute;
-  right: -20px;
-  top: 20px;
-  animation: float 3s ease-in-out infinite 0.5s;
-  z-index: 1;
 }
 
 @keyframes float {
@@ -276,13 +281,15 @@
 
 /* (C) 标题 */
 .update-dialog-title-new {
-  padding: 24px 24px 16px;
-  text-align: center;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0 8px 0 0;
+  text-align: left;
 }
 
 .update-dialog-title-new h2 {
   margin: 0;
-  font-size: 24px;
+  font-size: 20px;
   font-weight: 600;
   color: #333;
 }
@@ -291,17 +298,26 @@
 .update-dialog-content-wrapper {
   position: relative;
   padding: 0 24px 24px;
-  flex: 1;
-  min-height: 100px;
-  max-height: calc(80vh - 400px); /* 动态计算：视口高度80%减去其他元素的高度（标题、插画、按钮等约400px） */
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  height: calc(80vh - 350px);
+  max-height: calc(80vh - 350px); /* 头部压缩后，将空间补充给内容区域 */
+  overflow: hidden;
 }
 
 .update-dialog-content-new {
   padding: 0;
-  padding-bottom: 100px; /* 🔧 底部预留足够空间，确保最后一行文字不压到按钮 */
+  padding-bottom: 8px;
+  flex: 1 1 auto;
+  height: 100%;
+  min-height: 120px;
   max-height: 100%;
+  box-sizing: border-box;
   overflow-y: auto;
   overflow-x: hidden;
+  overscroll-behavior: contain; /* 内容滚动到边界时不传递给背景 */
   /* 确保滚动条始终可见且更明显 */
   scrollbar-width: 8px; /* Firefox: 增加滚动条宽度 */
   scrollbar-color: #999 #f0f0f0; /* Firefox: 滚动条颜色更明显 */
@@ -311,12 +327,14 @@
 /* WebKit 浏览器滚动条样式 - 更明显 */
 .update-dialog-content-new::-webkit-scrollbar {
   width: 8px; /* 增加滚动条宽度，从6px到8px */
+  display: block !important; /* 覆盖全局隐藏滚动条规则 */
 }
 
 .update-dialog-content-new::-webkit-scrollbar-track {
   background: #f0f0f0;
   border-radius: 4px;
   margin: 8px 0; /* 上下留出边距 */
+  display: block !important;
 }
 
 .update-dialog-content-new::-webkit-scrollbar-thumb {
@@ -324,41 +342,12 @@
   border-radius: 4px;
   border: 1px solid #f0f0f0; /* 添加边框，更清晰 */
   min-height: 40px; /* 确保滚动条滑块最小高度 */
+  display: block !important;
 }
 
 .update-dialog-content-new::-webkit-scrollbar-thumb:hover {
   background: #777; /* 悬停时更深 */
 }
-
-/* 滚动提示遮罩 - 顶部渐变 */
-.update-content-scroll-indicator-top {
-  position: absolute;
-  top: 24px;
-  left: 24px;
-  right: 28px; /* 为滚动条留出空间 */
-  height: 30px; /* 增加高度，更明显 */
-  background: linear-gradient(to bottom, rgba(255, 255, 255, 1) 0%, rgba(255, 255, 255, 0.8) 50%, rgba(255, 255, 255, 0) 100%);
-  pointer-events: none;
-  z-index: 2;
-  opacity: 0; /* 默认隐藏，滚动时显示 */
-  transition: opacity 0.3s ease;
-}
-
-/* 滚动提示遮罩 - 底部渐变 */
-.update-content-scroll-indicator-bottom {
-  position: absolute;
-  bottom: 100px; /* 🔧 与内容区域的 padding-bottom 对齐，确保在按钮上方 */
-  left: 24px;
-  right: 28px; /* 为滚动条留出空间 */
-  height: 40px; /* 增加高度，更明显 */
-  background: linear-gradient(to top, rgba(255, 255, 255, 1) 0%, rgba(255, 255, 255, 0.8) 50%, rgba(255, 255, 255, 0) 100%);
-  pointer-events: none;
-  z-index: 2;
-  opacity: 1; /* 默认显示底部遮罩，提示可以向下滚动 */
-  transition: opacity 0.3s ease;
-}
-
-/* 滚动遮罩的显示由 JavaScript 控制，这里只定义默认样式 */
 
 /* 滚动提示文字 */
 .update-content-scroll-hint {
@@ -426,29 +415,34 @@
 
 .update-content-item:last-child {
   border-bottom: none;
-  padding-bottom: 4px; /* 最后一项减少底部间距 */
+  padding-bottom: 6px;
 }
 
 /* (E & F) 按钮区域 */
 .update-dialog-actions-new {
   display: flex;
-  gap: 12px;
+  align-items: center; /* 上下居中 */
+  justify-content: center;
+  gap: 20px;
   padding: 0 24px 24px;
   margin-top: 8px; /* 🔧 确保按钮与内容区域有足够间距 */
   flex-shrink: 0; /* 🔧 固定在底部，不被内容挤压 */
 }
 
 .update-button-secondary {
-  flex: 1;
-  padding: 12px 24px;
-  border: 1px solid #e0e0e0;
-  border-radius: 6px;
-  background: white;
-  color: #666;
-  font-size: 15px;
+  flex: 1 1 0;
+  min-width: 160px;
+  max-width: 220px;
+  min-height: 44px;
+  padding: 10px 20px;
+  border: 1px solid #d9deea;
+  border-radius: 10px;
+  background: #f7f8fb;
+  color: #4a5160;
+  font-size: 14px;
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.2s;
+  transition: all 0.2s ease;
 }
 
 .update-button-secondary:hover {
@@ -458,16 +452,19 @@
 }
 
 .update-button-primary {
-  flex: 1;
-  padding: 12px 24px;
+  flex: 1 1 0;
+  min-width: 160px;
+  max-width: 220px;
+  min-height: 44px;
+  padding: 10px 20px;
   border: none;
-  border-radius: 6px;
+  border-radius: 10px;
   background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
   color: white;
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.2s;
+  transition: all 0.2s ease;
   box-shadow: 0 2px 8px rgba(102, 126, 234, 0.3);
 }
 
@@ -571,6 +568,7 @@
   min-height: 0; /* 🔧 关键：允许内容区域收缩 */
   overflow-y: auto; /* 🔧 启用垂直滚动 */
   overflow-x: hidden;
+  overscroll-behavior: contain; /* 内容滚动到边界时不传递给背景 */
   padding-right: 8px; /* 为滚动条留出空间 */
   padding-bottom: 120px; /* 🔧 增加底部预留空间，确保最后一行文字不压到按钮 */
   box-sizing: border-box; /* 🔧 确保 padding 包含在高度内 */
@@ -582,12 +580,14 @@
 /* WebKit 浏览器滚动条样式 - 更明显 */
 .update-force-content::-webkit-scrollbar {
   width: 8px; /* 增加滚动条宽度，从6px到8px */
+  display: block !important; /* 覆盖全局隐藏滚动条规则 */
 }
 
 .update-force-content::-webkit-scrollbar-track {
   background: #f0f0f0;
   border-radius: 4px;
   margin: 8px 0; /* 上下留出边距 */
+  display: block !important;
 }
 
 .update-force-content::-webkit-scrollbar-thumb {
@@ -595,27 +595,11 @@
   border-radius: 4px;
   border: 1px solid #f0f0f0; /* 添加边框，更清晰 */
   min-height: 40px; /* 确保滚动条滑块最小高度 */
+  display: block !important;
 }
 
 .update-force-content::-webkit-scrollbar-thumb:hover {
   background: #777; /* 悬停时更深 */
-}
-
-/* 强制更新内容的滚动提示遮罩 */
-.update-force-content-wrapper .update-content-scroll-indicator-top {
-  top: 0;
-  left: 0;
-  right: 8px; /* 为滚动条留出空间 */
-  height: 30px; /* 增加高度，更明显 */
-  background: linear-gradient(to bottom, rgba(255, 255, 255, 1) 0%, rgba(255, 255, 255, 0.8) 50%, rgba(255, 255, 255, 0) 100%);
-}
-
-.update-force-content-wrapper .update-content-scroll-indicator-bottom {
-  bottom: 120px; /* 🔧 与内容区域的 padding-bottom 对齐，确保在按钮上方 */
-  left: 0;
-  right: 8px; /* 为滚动条留出空间 */
-  height: 40px; /* 增加高度，更明显 */
-  background: linear-gradient(to top, rgba(255, 255, 255, 1) 0%, rgba(255, 255, 255, 0.8) 50%, rgba(255, 255, 255, 0) 100%);
 }
 
 .update-force-content-wrapper .update-content-scroll-hint {
@@ -666,6 +650,98 @@
   transform: translateY(0);
 }
 
+/* ========== 平台主题：macOS 原生风 ========== */
+.update-dialog.mac-theme {
+  border-radius: 12px;
+}
+
+.update-dialog-new.mac-theme {
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.22);
+  border: 1px solid #e3e6ef;
+}
+
+.update-dialog-new.mac-theme .update-dialog-illustration {
+  background: transparent;
+  border-bottom: none;
+}
+
+.update-dialog-new.mac-theme .update-dialog-title-new h2 {
+  color: #1f232b;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+
+.update-dialog-new.mac-theme .update-button-secondary {
+  background: #f3f4f7;
+  border: 1px solid #cfd5e1;
+  color: #2d3440;
+  box-shadow: none;
+}
+
+.update-dialog-new.mac-theme .update-button-primary {
+  background: #0a84ff;
+  box-shadow: none;
+  border: 1px solid #0a7af0;
+}
+
+.update-dialog-new.mac-theme .update-button-primary:hover {
+  transform: none;
+  background: #0077ed;
+  box-shadow: none;
+}
+
+.update-dialog-force.mac-theme .update-button-force-primary {
+  background: #0a84ff;
+  box-shadow: none;
+  border: 1px solid #0a7af0;
+}
+
+.update-dialog-force.mac-theme .update-button-force-primary:hover {
+  transform: none;
+  background: #0077ed;
+  box-shadow: none;
+}
+
+/* ========== 平台主题：Windows 风格 ========== */
+.update-dialog.win-theme {
+  border-radius: 8px;
+}
+
+.update-dialog-new.win-theme {
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.3);
+  border: 1px solid #d0d6e3;
+}
+
+.update-dialog-new.win-theme .update-dialog-illustration {
+  background: transparent;
+  border-bottom: none;
+}
+
+.update-dialog-new.win-theme .update-button-secondary {
+  background: #ffffff;
+  border: 1px solid #b8c3d6;
+  color: #1d2432;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.8) inset;
+}
+
+.update-dialog-new.win-theme .update-button-primary {
+  background: #0078d4;
+  border: 1px solid #006cbe;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.22);
+}
+
+.update-dialog-new.win-theme .update-button-primary:hover {
+  background: #106ebe;
+  transform: none;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.24);
+}
+
+.update-dialog-force.win-theme .update-button-force-primary {
+  background: #0078d4;
+  border: 1px solid #006cbe;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.22);
+}
+
 /* 小屏幕适配 */
 @media (max-width: 480px) {
   .update-dialog {
@@ -702,23 +778,23 @@
   }
 
   .update-dialog-illustration {
-    height: 100px;
+    width: 130px;
+    flex-basis: 130px;
+    height: 90px;
   }
 
-  .update-illustration-astronaut {
-    font-size: 60px;
-  }
-
-  .update-illustration-gift {
-    font-size: 45px;
+  .update-illustration-update-icon {
+    width: 46px;
+    height: 46px;
+    font-size: 24px;
   }
 
   .update-dialog-title-new {
-    padding: 20px 16px 12px;
+    padding: 0;
   }
 
   .update-dialog-title-new h2 {
-    font-size: 20px;
+    font-size: 18px;
   }
 
   .update-dialog-content-new {
@@ -727,6 +803,7 @@
 
   .update-dialog-actions-new {
     flex-direction: column;
+    gap: 12px;
     padding: 0 16px 20px;
   }
 
@@ -805,29 +882,18 @@
 
 /* 下载完成样式 */
 .update-download-completed {
-  margin-top: 20px;
-  text-align: center;
-}
-
-.update-completed-icon {
-  width: 60px;
-  height: 60px;
-  margin: 0 auto 15px;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  border-radius: 50%;
+  margin-top: 12px;
+  padding: 0 24px 20px;
+  border-top: 1px solid #f2f3f7;
+  min-height: 84px;
   display: flex;
-  align-items: center;
+  align-items: center; /* 让内部按钮区在完成区内上下居中 */
   justify-content: center;
-  font-size: 32px;
-  color: white;
-  font-weight: bold;
 }
 
-.update-completed-message {
-  font-size: 16px;
-  color: #333;
-  margin-bottom: 20px;
-  font-weight: 500;
+.update-download-completed .update-dialog-actions-new {
+  margin-top: 0;
+  padding: 0;
 }
 
 /* 下载错误样式 */
