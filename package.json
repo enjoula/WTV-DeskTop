@@ -4,8 +4,8 @@
   "workspaces": [
     "src/renderer"
   ],
-  "version": "1.0.1",
-  "versionCode": 101,
+  "version": "1.0.2",
+  "versionCode": 102,
   "buildDate": "20260428",
   "description": "看视频 - WTV Desktop Application",
   "main": "src/main/main.js",

@@ -2956,7 +2956,7 @@ const VideoDetail = () => {
   }, [volume, muted, playbackRate, videoFitMode, autoNextEpisode]);
 
   // 处理点击推荐视频，在新窗口打开视频详情页
-  const handleRelatedVideoClick = (e, video) => {
+  const handleRelatedVideoClick = async (e, video) => {
     e.preventDefault();
     
     // 规范化视频数据，确保封面图字段一致
@@ -2966,8 +2966,22 @@ const VideoDetail = () => {
     
     // 使用 Electron API 在新窗口打开视频详情页（如果窗口已存在则更新内容）
     if (window.electronAPI && window.electronAPI.openVideoWindow) {
-      window.electronAPI.openVideoWindow(normalizedVideo.id, normalizedVideo);
-    } else {
+      try {
+        await window.electronAPI.openVideoWindow(normalizedVideo.id, normalizedVideo);
+      } catch (err) {
+        console.error('打开视频详情窗口失败:', err);
+        showCenterTip('打开视频详情窗口失败');
+      }
+      return;
+    }
+
+    // 在播放窗口中不允许回退为当前窗口内跳转，避免把播放页切成详情页
+    if (isPlayerWindow) {
+      showCenterTip('当前环境不支持打开视频详情窗口');
+      return;
+    }
+
+    {
       // 降级处理：如果没有 Electron API，使用 navigate（开发环境可能用到）
     dispatch(clearPlayUrl());
     dispatch(clearEpisodes());

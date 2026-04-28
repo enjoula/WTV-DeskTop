@@ -118,6 +118,8 @@ const MyArtPlayer = forwardRef(({
   const currentVolumeRef = useRef(volume);
   const currentMutedRef = useRef(muted);
   const currentPlaybackRateRef = useRef(playbackRate);
+  const hasActivatedSpeedIndicatorRef = useRef(playbackRate !== 1);
+  const syncSpeedIndicatorRef = useRef(null);
   const autoNextEpisodeRef = useRef(autoNextEpisode);
   const onToggleAutoNextEpisodeRef = useRef(onToggleAutoNextEpisode);
   const isFullscreenRef = useRef(isFullscreen);
@@ -292,6 +294,9 @@ const MyArtPlayer = forwardRef(({
           artInstanceRef.current.video.playbackRate = rate;
         }
         currentPlaybackRateRef.current = rate;
+        if (syncSpeedIndicatorRef.current) {
+          syncSpeedIndicatorRef.current(rate);
+        }
         // 同步更新设置面板速度选择器的 tooltip
         try {
           const item = artInstanceRef.current.setting?.find?.('speed');
@@ -480,6 +485,35 @@ const MyArtPlayer = forwardRef(({
         // 直接设置 video.playbackRate 作为双重保险
         art.video.playbackRate = currentPlaybackRateRef.current;
 
+        const ensureSpeedIndicator = () => {
+          if (!art.container) return null;
+          let indicator = art.container.querySelector('.wtv-speed-indicator');
+          if (!indicator) {
+            indicator = document.createElement('div');
+            indicator.className = 'wtv-speed-indicator';
+            art.container.appendChild(indicator);
+          }
+          return indicator;
+        };
+
+        const syncSpeedIndicator = (rate) => {
+          const indicator = ensureSpeedIndicator();
+          if (!indicator) return;
+          const numericRate = Number(rate) || 1;
+          if (numericRate !== 1) {
+            hasActivatedSpeedIndicatorRef.current = true;
+          }
+          if (hasActivatedSpeedIndicatorRef.current) {
+            indicator.textContent = `${numericRate}x`;
+            indicator.classList.add('is-visible');
+          } else {
+            indicator.textContent = '';
+            indicator.classList.remove('is-visible');
+          }
+        };
+        syncSpeedIndicatorRef.current = syncSpeedIndicator;
+        syncSpeedIndicator(currentPlaybackRateRef.current);
+
         // 恢复切换去广告前的播放进度
         if (pendingResumeRef.current !== null) {
           const t = pendingResumeRef.current;
@@ -555,6 +589,9 @@ const MyArtPlayer = forwardRef(({
 
         const handleRateChange = () => {
           const newRate = art.video.playbackRate;
+          if (syncSpeedIndicatorRef.current) {
+            syncSpeedIndicatorRef.current(newRate);
+          }
           if (currentPlaybackRateRef.current !== newRate) {
             currentPlaybackRateRef.current = newRate;
             if (onRateChangeRef.current) onRateChangeRef.current(newRate);
@@ -604,6 +641,9 @@ const MyArtPlayer = forwardRef(({
             try { art.playbackRate = rate; } catch (_) { /* ignore */ }
             if (art.video) art.video.playbackRate = rate;
             currentPlaybackRateRef.current = rate;
+            if (syncSpeedIndicatorRef.current) {
+              syncSpeedIndicatorRef.current(rate);
+            }
             if (onRateChangeRef.current) onRateChangeRef.current(rate);
             return item.html;
           },
@@ -868,6 +908,9 @@ const MyArtPlayer = forwardRef(({
       artInstanceRef.current.video.playbackRate = playbackRate;
     }
     currentPlaybackRateRef.current = playbackRate;
+    if (syncSpeedIndicatorRef.current) {
+      syncSpeedIndicatorRef.current(playbackRate);
+    }
     // 同步更新设置面板速度选择器的 tooltip 显示
     try {
       const item = artInstanceRef.current.setting?.find?.('speed');
