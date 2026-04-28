@@ -48,7 +48,7 @@ const Favorites = () => {
     dispatch(fetchFavorites({ page: nextPage, size: 20 })).finally(() => {
       loadingRef.current = false;
     });
-  }, [favorites, dispatch]);
+  }, [favorites.loading, favorites.pagination, favorites.data.length, dispatch]);
 
   // 懒加载：使用 Intersection Observer 监听滚动到底部
   useEffect(() => {

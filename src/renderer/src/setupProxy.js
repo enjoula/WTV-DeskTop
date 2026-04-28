@@ -1,10 +1,11 @@
 const { createProxyMiddleware } = require('http-proxy-middleware');
+const { API_BASE_URL } = require('./config/apiConfig');
 
 module.exports = function(app) {
   app.use(
     '/api',
     createProxyMiddleware({
-      target: 'http://124.222.196.128:6660',
+      target: API_BASE_URL,
       changeOrigin: true,
       pathRewrite: {
         '^/api': '', // Remove /api prefix when forwarding to the target
@@ -20,7 +21,7 @@ module.exports = function(app) {
   app.use(
     '/video',
     createProxyMiddleware({
-      target: 'http://124.222.196.128:6660',
+      target: API_BASE_URL,
       changeOrigin: true,
     })
   );
@@ -29,7 +30,7 @@ module.exports = function(app) {
   app.use(
     '/user',
     createProxyMiddleware({
-      target: 'http://124.222.196.128:6660',
+      target: API_BASE_URL,
       changeOrigin: true,
     })
   );
@@ -38,7 +39,7 @@ module.exports = function(app) {
   app.use(
     '/app',
     createProxyMiddleware({
-      target: 'http://124.222.196.128:6660',
+      target: API_BASE_URL,
       changeOrigin: true,
     })
   );
@@ -47,7 +48,7 @@ module.exports = function(app) {
   app.use(
     '/ping',
     createProxyMiddleware({
-      target: 'http://124.222.196.128:6660',
+      target: API_BASE_URL,
       changeOrigin: true,
     })
   );

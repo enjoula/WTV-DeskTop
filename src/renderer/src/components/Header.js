@@ -3,7 +3,8 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { useSelector, useDispatch } from 'react-redux';
 import { logoutUser, fetchCurrentUser } from '../store/authSlice';
-import { fetchFavorites } from '../store/favoriteSlice';
+import { processAvatarUrl } from '../config/apiConfig';
+import PlatformIcon from './PlatformIcon';
 
 const Header = () => {
   const navigate = useNavigate();
@@ -14,45 +15,6 @@ const Header = () => {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [avatarError, setAvatarError] = useState(false);
   const dropdownRef = useRef(null);
-
-  // 处理头像URL，确保是完整URL
-  const processAvatarUrl = (url) => {
-    if (!url) return null;
-    
-    // 如果已经是完整URL，直接返回
-    if (url.startsWith('http://') || url.startsWith('https://')) {
-      return url;
-    }
-    
-    // 如果是相对路径，需要拼接API基础URL
-    const getBaseURL = () => {
-      const isElectron = typeof window !== 'undefined' && (
-        window.electronAPI || 
-        window.location.protocol === 'file:' ||
-        navigator.userAgent.includes('Electron')
-      );
-      
-      if (isElectron) {
-        return 'http://124.222.196.128:6660';
-      }
-      
-      if (process.env.NODE_ENV === 'development') {
-        return '/api';
-      }
-      
-      return 'http://124.222.196.128:6660';
-    };
-    
-    const baseURL = getBaseURL();
-    
-    // 如果URL以/开头，直接拼接
-    if (url.startsWith('/')) {
-      return `${baseURL}${url}`;
-    }
-    
-    // 否则添加/后拼接
-    return `${baseURL}/${url}`;
-  };
 
   const handleLogout = () => {
     dispatch(logoutUser()).then(() => {
@@ -78,19 +40,7 @@ const Header = () => {
     setAvatarError(false);
   }, [user?.avatar_url, user?.avatar]);
 
-  // 登录后拉取一次用户收藏列表，避免详情页无法识别已收藏状态
-  // 使用 ref 避免重复调用
-  const hasFetchedFavoritesRef = React.useRef(false);
-  React.useEffect(() => {
-    if (isAuthenticated && user && !hasFetchedFavoritesRef.current) {
-      hasFetchedFavoritesRef.current = true;
-      dispatch(fetchFavorites({ page: 1, size: 50 }));
-    }
-    // 如果用户登出，重置标志
-    if (!isAuthenticated) {
-      hasFetchedFavoritesRef.current = false;
-    }
-  }, [isAuthenticated, user, dispatch]);
+  // 不再自动获取收藏列表，只在用户进入收藏列表页面时获取
 
   // 点击外部区域关闭菜单
   useEffect(() => {
@@ -146,30 +96,30 @@ const Header = () => {
         
         <nav className="main-nav">
           <Link to="/videos/movies" className={isActive('/videos/movies') ? 'active' : ''}>
-            <span className="nav-icon">🎬</span>
+            <PlatformIcon className="nav-icon" iconName="movie" fallback="🎬" />
             <span className="nav-text">电影</span>
           </Link>
           <Link to="/videos/tv" className={isActive('/videos/tv') ? 'active' : ''}>
-            <span className="nav-icon">📺</span>
+            <PlatformIcon className="nav-icon" iconName="tv" fallback="📺" />
             <span className="nav-text">电视剧</span>
           </Link>
           <Link to="/videos/anime" className={isActive('/videos/anime') ? 'active' : ''}>
-            <span className="nav-icon">🎨</span>
+            <PlatformIcon className="nav-icon" iconName="anime" fallback="🎨" />
             <span className="nav-text">动漫</span>
           </Link>
           <Link to="/videos/tvshow" className={isActive('/videos/tvshow') ? 'active' : ''}>
-            <span className="nav-icon">🎪</span>
+            <PlatformIcon className="nav-icon" iconName="variety" fallback="🎪" />
             <span className="nav-text">综艺</span>
           </Link>
           <Link to="/videos/documentary" className={isActive('/videos/documentary') ? 'active' : ''}>
-            <span className="nav-icon">📽️</span>
+            <PlatformIcon className="nav-icon" iconName="documentary" fallback="📽️" />
             <span className="nav-text">纪录片</span>
           </Link>
         </nav>
         
         <div className="header-actions">
           <Link to="/search" className="search-link" aria-label="搜索">
-            <span className="search-icon-header">🔍</span>
+            <PlatformIcon className="search-icon-header" iconName="search" fallback="🔍" />
           </Link>
           
           {isAuthenticated ? (
@@ -215,7 +165,18 @@ const Header = () => {
             </div>
           ) : (
             <div className="auth-links">
-              <Link to="/login">登录</Link>
+              <Link
+                to="/login"
+                state={{
+                  from: {
+                    pathname: location.pathname,
+                    search: location.search,
+                    hash: location.hash,
+                  },
+                }}
+              >
+                登录
+              </Link>
               <Link to="/register">注册</Link>
             </div>
           )}

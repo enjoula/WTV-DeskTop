@@ -122,6 +122,47 @@ function build(platform) {
   }
 }
 
+// 清理 mac 打包过程中生成的中间 .app 目录，避免被系统“应用程序存储”统计为已安装应用
+function cleanMacUnpackedApps() {
+  const macUnpackedDirs = [
+    path.join(process.cwd(), 'dist', 'mac', 'mac'),
+    path.join(process.cwd(), 'dist', 'mac', 'mac-arm64'),
+  ];
+
+  let cleanedCount = 0;
+  macUnpackedDirs.forEach((dirPath) => {
+    if (fs.existsSync(dirPath)) {
+      try {
+        fs.rmSync(dirPath, { recursive: true, force: true });
+        cleanedCount += 1;
+      } catch (err) {
+        log(`⚠️  清理中间目录失败: ${dirPath} (${err.message})`, 'yellow');
+      }
+    }
+  });
+
+  if (cleanedCount > 0) {
+    log(`🧹 已清理 ${cleanedCount} 个 mac 中间目录（保留 dmg 安装包）`, 'green');
+  }
+}
+
+// 写入打包日期到 package.json（格式：YYYYMMDD）
+function writeBuildDate() {
+  const packageJsonPath = path.join(process.cwd(), 'package.json');
+  try {
+    const content = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+    const now = new Date();
+    const yyyy = String(now.getFullYear());
+    const mm = String(now.getMonth() + 1).padStart(2, '0');
+    const dd = String(now.getDate()).padStart(2, '0');
+    content.buildDate = `${yyyy}${mm}${dd}`;
+    fs.writeFileSync(packageJsonPath, JSON.stringify(content, null, 2) + '\n', 'utf8');
+    log(`📅 打包日期已写入: ${content.buildDate}`, 'green');
+  } catch (err) {
+    log(`⚠️  写入打包日期失败: ${err.message}`, 'yellow');
+  }
+}
+
 // 主函数
 function main() {
   log('🚀 开始一键打包所有平台...', 'bright');
@@ -133,6 +174,9 @@ function main() {
   const onlyWin = args.includes('--win-only');
   
   try {
+    // 写入打包日期
+    writeBuildDate();
+
     // 清理缓存
     if (!skipClean) {
       cleanCache();
@@ -181,6 +225,10 @@ function main() {
     if (failedPlatforms.length > 0) {
       process.exit(1);
     } else {
+      // 清理 mac 的中间 .app 目录，避免系统误识别为多个“已安装应用”
+      if (platforms.includes('mac')) {
+        cleanMacUnpackedApps();
+      }
       log('\n🎉 所有平台打包完成！', 'green');
     }
     

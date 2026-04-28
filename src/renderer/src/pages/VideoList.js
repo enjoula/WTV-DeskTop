@@ -20,12 +20,34 @@ const VideoList = () => {
   const { category } = useParams();
   const dispatch = useDispatch();
   const navigate = useNavigate();
-  const [page, setPage] = useState(1);
+  const pageStorageKey = useCallback((targetCategory) => `videoList.page.${targetCategory}`, []);
+  const scrollStorageKey = useCallback((targetCategory) => `videoList.scroll.${targetCategory}`, []);
+  const readStoredNumber = useCallback((key) => {
+    if (!key) {
+      return null;
+    }
+    const rawValue = sessionStorage.getItem(key);
+    if (rawValue === null) {
+      return null;
+    }
+    const parsed = Number(rawValue);
+    return Number.isFinite(parsed) ? parsed : null;
+  }, []);
+  const [page, setPage] = useState(() => {
+    const storedPage = readStoredNumber(pageStorageKey(category));
+    return storedPage && storedPage > 0 ? storedPage : 1;
+  });
   const [activeFilters, setActiveFilters] = useState({});
   const { movies, tvShows, anime, varietyShows, documentaries, filterResults } = useSelector(state => state.video);
   const { isAuthenticated } = useSelector(state => state.auth);
   const loadingRef = useRef(false); // 防止重复加载
-  const observerTarget = useRef(null); // Intersection Observer 的目标元素
+  const observerInstance = useRef(null); // Intersection Observer 实例
+  const categoryFetchedRef = useRef(null); // 记录已获取的分类，防止重复调用
+  const fetchingRef = useRef(false); // 防止同一分类同时发起多个请求
+  // 用于标记上一次的类别
+  const prevCategoryRef = useRef(null);
+  // 标记当前分类是否已完成滚动恢复，避免数据追加时重复触发
+  const restoredCategoryRef = useRef(null);
   
   // 根据类别选择对应的状态
   const getCategoryData = () => {
@@ -60,42 +82,160 @@ const VideoList = () => {
     });
   }, [category, page, categoryData.data.length, categoryData.pagination, categoryData.loading]);
   
+  // 监听 category 变化：保存旧分类滚动位置，并重置当前分类恢复标记
   useEffect(() => {
+    if (prevCategoryRef.current && prevCategoryRef.current !== category) {
+      const scrollY = window.scrollY;
+      sessionStorage.setItem(scrollStorageKey(prevCategoryRef.current), String(scrollY));
+    }
+    restoredCategoryRef.current = null;
+    prevCategoryRef.current = category;
+  }, [category, scrollStorageKey]);
+
+  // 列表滚动过程中持续保存当前位置，保证切换/返回时更准确
+  useEffect(() => {
+    let rafId = null;
+    const persistScroll = () => {
+      rafId = null;
+      sessionStorage.setItem(scrollStorageKey(category), String(window.scrollY));
+    };
+    const handleScroll = () => {
+      if (rafId !== null) {
+        return;
+      }
+      rafId = window.requestAnimationFrame(persistScroll);
+    };
+    window.addEventListener('scroll', handleScroll, { passive: true });
+
+    return () => {
+      window.removeEventListener('scroll', handleScroll);
+      if (rafId !== null) {
+        window.cancelAnimationFrame(rafId);
+      }
+      const scrollY = window.scrollY;
+      sessionStorage.setItem(scrollStorageKey(category), String(scrollY));
+    };
+  }, [category, scrollStorageKey]);
+  
+  // 分类切换后仅恢复一次滚动位置，避免加载下一页时重复触发导致“回顶”
+  useEffect(() => {
+    if (restoredCategoryRef.current === category) {
+      return;
+    }
+
+    const savedPosition = readStoredNumber(scrollStorageKey(category)) || 0;
+    const shouldWaitForData =
+      savedPosition > 0 && categoryData.loading && categoryData.data.length === 0;
+
+    if (shouldWaitForData) {
+      return;
+    }
+
+    const rafId = window.requestAnimationFrame(() => {
+      window.scrollTo({ top: savedPosition, left: 0, behavior: 'auto' });
+      restoredCategoryRef.current = category;
+    });
+
+    return () => window.cancelAnimationFrame(rafId);
+  }, [category, categoryData.loading, categoryData.data.length, readStoredNumber, scrollStorageKey]);
+  
+  useEffect(() => {
+    // 防止重复调用：如果正在获取同一分类的数据，跳过
+    if (fetchingRef.current && categoryFetchedRef.current === category) {
+      console.log('正在获取该分类数据，跳过重复调用:', category);
+      return;
+    }
+
+    // 防止重复调用：如果当前分类已经获取过数据，且数据不为空且不在加载中，则不重复调用
+    if (categoryFetchedRef.current === category && categoryData.data.length > 0 && !categoryData.loading) {
+      console.log('分类数据已存在，跳过重复调用:', category);
+      return;
+    }
+
+    // 如果数据正在加载中，不重复调用
+    if (categoryData.loading) {
+      console.log('数据正在加载中，跳过重复调用:', category);
+      return;
+    }
+
     // 记录当前分类，用于详情页顶部高亮
     dispatch(setCurrentCategory(category));
 
-    // 切换分类时，先清空当前分类的数据，避免显示旧数据
-    dispatch(clearCategoryData(category));
-
-    // 重置页码
-    setPage(1);
+    // 切换分类时的处理
+    if (categoryFetchedRef.current !== category) {
+      // 如果新类别没有数据，才需要获取
+      if (categoryData.data.length === 0) {
+        // 重置页码
+        setPage(1);
+        sessionStorage.setItem(pageStorageKey(category), '1');
+        // 重置加载状态
+        loadingRef.current = false;
+        
+        // 标记当前分类已开始获取
+        categoryFetchedRef.current = category;
+        fetchingRef.current = true;
+        
+        // 获取数据后，滚动位置会在专门的 useEffect 中恢复
+      } else {
+        // 如果已有数据，标记分类并返回（滚动位置由专门的 useEffect 处理）
+        categoryFetchedRef.current = category;
+        fetchingRef.current = false;
+        return; // 已有数据，不需要重新获取
+      }
+    } else {
+      // 同一分类，标记并继续
+      categoryFetchedRef.current = category;
+      fetchingRef.current = true;
+    }
     
     // 根据类别获取数据
     const fetchData = (pageNum) => {
       const params = { page: pageNum, size: 10 }; // API文档使用 size 而不是 page_size
+      let fetchPromise;
       switch (category) {
         case 'movies':
-          dispatch(fetchMovies(params));
+          fetchPromise = dispatch(fetchMovies(params));
           break;
         case 'tv':
-          dispatch(fetchTVShows(params));
+          fetchPromise = dispatch(fetchTVShows(params));
           break;
         case 'anime':
-          dispatch(fetchAnime(params));
+          fetchPromise = dispatch(fetchAnime(params));
           break;
         case 'tvshow':
-          dispatch(fetchVarietyShows(params));
+          fetchPromise = dispatch(fetchVarietyShows(params));
           break;
         case 'documentary':
-          dispatch(fetchDocumentaries(params));
+          fetchPromise = dispatch(fetchDocumentaries(params));
           break;
         default:
-          dispatch(fetchMovies(params));
+          fetchPromise = dispatch(fetchMovies(params));
       }
+      
+      // 请求完成后清除 fetching 标志（滚动位置由专门的 useEffect 处理）
+      fetchPromise.finally(() => {
+        fetchingRef.current = false;
+      });
     };
     
     fetchData(1);
-  }, [category, dispatch, isAuthenticated]); // 添加 isAuthenticated 依赖，登录状态变化时重新获取数据
+  }, [category, dispatch, categoryData.loading, categoryData.data.length, pageStorageKey]); // 添加 categoryData 相关依赖，确保状态变化时能正确判断
+
+  // 同步当前页码（来自分页信息或本地缓存）
+  useEffect(() => {
+    const currentPage = categoryData.pagination?.page;
+    if (currentPage && currentPage !== page) {
+      setPage(currentPage);
+    }
+    if (currentPage) {
+      sessionStorage.setItem(pageStorageKey(category), String(currentPage));
+      return;
+    }
+    const storedPage = readStoredNumber(pageStorageKey(category));
+    if (storedPage && storedPage !== page) {
+      setPage(storedPage);
+    }
+  }, [category, categoryData.pagination?.page, page, pageStorageKey, readStoredNumber]);
   
   // 懒加载：加载更多数据
   const loadMore = useCallback(() => {
@@ -154,9 +294,11 @@ const VideoList = () => {
       return;
     }
     
-    const nextPage = page + 1;
+    const currentPage = categoryData.pagination?.page || page || 1;
+    const nextPage = currentPage + 1;
     console.log('加载下一页:', nextPage);
     setPage(nextPage);
+    sessionStorage.setItem(pageStorageKey(category), String(nextPage));
     
     // 现在 reducer 已经支持追加数据了
     const params = { page: nextPage, size: 10 }; // API文档使用 size 而不是 page_size
@@ -184,40 +326,32 @@ const VideoList = () => {
     });
   }, [category, page, categoryData, activeFilters, filterResults, dispatch]);
 
-  // 懒加载：使用 Intersection Observer 监听滚动到底部
+  // 始终保持 loadMore 最新引用，避免 Observer 闭包捕获过期值
+  const loadMoreRef = useRef(loadMore);
   useEffect(() => {
-    const pagination = categoryData.pagination || {};
-    const hasNext = pagination.has_next !== undefined ? pagination.has_next : 
-                   (pagination.total > 0 ? categoryData.data.length < pagination.total : true);
-    
-    // 如果没有下一页或正在加载，不设置观察器
-    const targetElement = observerTarget.current;
-    if (!hasNext || categoryData.loading || !targetElement) {
-      return;
-    }
+    loadMoreRef.current = loadMore;
+  }, [loadMore]);
 
-    const observer = new IntersectionObserver(
+  // 懒加载：callback ref，DOM 元素挂载时创建 Observer，卸载时销毁
+  // 避免依赖数据状态重建 Observer，防止每次追加数据后立即触发下一页加载
+  const observerTargetCallback = useCallback((node) => {
+    // 先销毁旧的 Observer
+    if (observerInstance.current) {
+      observerInstance.current.disconnect();
+      observerInstance.current = null;
+    }
+    if (!node) return;
+
+    observerInstance.current = new IntersectionObserver(
       (entries) => {
-        // 当目标元素进入视口时，触发加载
         if (entries[0].isIntersecting) {
-          loadMore();
+          loadMoreRef.current();
         }
       },
-      {
-        root: null, // 使用视口作为根
-        rootMargin: '100px', // 提前100px开始加载
-        threshold: 0.1
-      }
+      { root: null, rootMargin: '100px', threshold: 0.1 }
     );
-
-    observer.observe(targetElement);
-
-    return () => {
-      if (targetElement) {
-        observer.unobserve(targetElement);
-      }
-    };
-  }, [categoryData.pagination, categoryData.loading, categoryData.data.length, loadMore]);
+    observerInstance.current.observe(node);
+  }, []); // 空依赖：callback ref 本身不需要重建
   
   // 处理筛选条件改变，自动应用筛选
   const handleFilterChange = (newFilters) => {
@@ -377,7 +511,7 @@ const VideoList = () => {
             // 返回一个不可见的观察目标元素
             return (
               <div 
-                ref={observerTarget}
+                ref={observerTargetCallback}
                 style={{ 
                   height: '20px', 
                   width: '100%',

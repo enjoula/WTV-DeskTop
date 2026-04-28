@@ -23,7 +23,7 @@ export const register = async (userData) => {
   
   const data = {
     ...userData,
-    device: device || 'DeskTop-Win' // 最后的默认值
+    device: device || 'PC-Windows' // 最后的默认值
   };
   
   console.log('注册 - 发送的数据:', { ...data, password: '***' });
@@ -52,7 +52,7 @@ export const login = async (credentials) => {
   
   const data = {
     ...credentials,
-    device: device || 'DeskTop-Win' // 最后的默认值
+    device: device || 'PC-Windows' // 最后的默认值
   };
   
   console.log('登录 - 发送的数据:', { ...data, password: '***' });

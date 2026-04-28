@@ -49,7 +49,10 @@ export const searchVideos = (params) => {
 // 获取视频剧集信息
 // 根据API文档，参数应该是 id 而不是 videoid
 export const getEpisodes = (videoId) => {
-  return apiClient.get(`/video/episodes?id=${videoId}`);
+  return apiClient.get(`/video/episodes?id=${videoId}`, {
+    // 未登录进入详情页时不弹全局登录框，播放时再触发登录流程
+    skipUnauthorizedHandling: true,
+  });
 };
 
 // 获取播放地址

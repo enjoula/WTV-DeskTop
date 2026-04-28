@@ -1,13 +1,19 @@
 {
   "name": "wtv",
-  "version": "1.0.0",
-  "versionCode": 100,
+  "private": true,
+  "workspaces": [
+    "src/renderer"
+  ],
+  "version": "1.0.2",
+  "versionCode": 102,
+  "buildDate": "20260428",
   "description": "看视频 - WTV Desktop Application",
   "main": "src/main/main.js",
   "scripts": {
     "start": "electron .",
     "dev": "concurrently \"npm run react-dev\" \"npm run electron-dev\"",
-    "react-dev": "cd src/renderer && npm start",
+    "react-dev": "npm run start -w src/renderer",
+    "react-dev:no-cache": "npm run start:no-cache -w src/renderer",
     "electron-dev": "nodemon --exec electron . --watch src/main",
     "build": "electron-builder",
     "pack": "electron-builder --dir",
@@ -17,7 +23,7 @@
     "build:all": "node build-all.js",
     "build:mac": "node build-all.js --mac-only",
     "build:win": "node build-all.js --win-only",
-    "build:react": "cd src/renderer && npm run build",
+    "build:react": "npm run build -w src/renderer",
     "build:icon": "node build/convert-icon.js"
   },
   "keywords": [
@@ -31,8 +37,8 @@
   "license": "MIT",
   "devDependencies": {
     "concurrently": "^7.6.0",
-    "electron": "^39.2.7",
-    "electron-builder": "^26.0.12",
+    "electron": "^21.4.4",
+    "electron-builder": "^23.6.0",
     "electron-icon-maker": "^0.0.5",
     "nodemon": "^3.1.11",
     "sharp": "^0.34.5"
@@ -40,6 +46,7 @@
   "build": {
     "appId": "com.wtv.app",
     "productName": "WTV",
+    "afterPack": "build/fix-mac-helper-visibility.js",
     "directories": {
       "output": "dist"
     },

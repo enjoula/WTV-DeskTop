@@ -1,6 +1,9 @@
 const { app, BrowserWindow, ipcMain, session, net } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const https = require('https');
+const http = require('http');
+const { Transform } = require('stream');
 
 console.log('📦 [主进程] main.js 正在加载...');
 
@@ -10,9 +13,12 @@ if (require('electron-squirrel-startup')) {
 }
 
 let mainWindow;
-let videoWindow = null; // 只保留一个视频窗口
-// 存储当前视频窗口的视频数据，用于传递给渲染进程
+let videoWindow = null; // 详情窗口（单例）
+let playerWindow = null; // 播放窗口（单例）
+// 存储当前窗口的视频数据，用于传递给渲染进程
 let currentVideoData = null;
+let currentPlayerVideoData = null;
+let currentVideoWindowTitle = '视频详情';
 
 let pngsucaiCookie = '';
 
@@ -67,6 +73,15 @@ const createWindow = () => {
   // 配置 session 以支持跨域图片请求
   const ses = session.defaultSession;
   
+  // 🔧 开发模式下清除缓存（在应用启动时）
+  if (!app.isPackaged && process.env.NODE_ENV !== 'production') {
+    ses.clearCache().then(() => {
+      console.log('开发模式：已清除缓存');
+    }).catch(err => {
+      console.error('清除缓存失败:', err);
+    });
+  }
+  
   // 设置请求头，添加用户要求的 Cookie（用于获取头像等图片）
   ses.webRequest.onBeforeSendHeaders((details, callback) => {
     const requestHeaders = {
@@ -108,6 +123,13 @@ const createWindow = () => {
       requestHeaders['Cookie'] = 'server_name_session=245619b23edc8a717a124f4092302064; img_auth=1767519930-102f39147b977d127328185881522622; Hm_lvt_386c683f3b0c25ee5b0bf789967980f8=1767519930; Hm_lpvt_386c683f3b0c25ee5b0bf789967980f8=1767519930; HMACCOUNT=2CDC1E500F1FB63C';
     }
 
+    // 🔧 开发模式下，为所有请求添加禁用缓存的头部
+    if (!app.isPackaged && process.env.NODE_ENV !== 'production') {
+      requestHeaders['Cache-Control'] = 'no-cache, no-store, must-revalidate';
+      requestHeaders['Pragma'] = 'no-cache';
+      requestHeaders['Expires'] = '0';
+    }
+    
     // 如果是豆瓣图片的请求，添加特定的请求头以绕过防盗链
     if (details.url.includes('doubanio')) {
       requestHeaders['Referer'] = 'https://www.douban.com/';
@@ -201,8 +223,9 @@ const createWindow = () => {
   mainWindow = new BrowserWindow({
     width: 1450,
     height: 950,
-    minWidth: 1100,
-    minHeight: 850,
+    resizable: false, // 禁用调整窗口大小
+    fullscreenable: false, // 禁用全屏功能
+    maximizable: false, // 禁用最大化功能
     title: '看视频 - WTV',
     backgroundColor: '#f5f5f5', // 设置背景色，避免白屏闪烁
     autoHideMenuBar: true, // 自动隐藏菜单栏（Windows 和 Linux）
@@ -211,6 +234,7 @@ const createWindow = () => {
       nodeIntegration: false,
       contextIsolation: true,
       webSecurity: false, // 禁用 webSecurity 以允许跨域图片加载（Electron 桌面应用可以这样做）
+      cache: false, // 🔧 禁用缓存，确保开发时所有资源都从服务器获取
     },
   });
   
@@ -259,8 +283,16 @@ const createWindow = () => {
     const loadDevServer = async () => {
       await waitForServer();
       try {
-        await mainWindow.loadURL('http://localhost:3000');
-        console.log('成功加载开发服务器');
+        // 🔧 清除缓存，确保所有资源都从服务器获取
+        const ses = mainWindow.webContents.session;
+        await ses.clearCache();
+        await ses.clearStorageData();
+        console.log('已清除缓存，准备加载开发服务器');
+        
+        // 🔧 禁用缓存，添加时间戳参数确保每次都是新请求
+        const timestamp = Date.now();
+        await mainWindow.loadURL(`http://localhost:3000?nocache=${timestamp}`);
+        console.log('成功加载开发服务器（已禁用缓存）');
       } catch (err) {
         console.error('加载开发服务器失败:', err);
         // 显示错误页面
@@ -596,6 +628,28 @@ ipcMain.handle('get-app-version', () => {
   return app.getVersion();
 });
 
+// 获取内部版本号（大版本号 + 打包日期），格式如 1.0.1-20260306
+ipcMain.handle('get-internal-version', () => {
+  try {
+    let packageJsonPath;
+    if (app.isPackaged) {
+      packageJsonPath = path.join(app.getAppPath(), 'package.json');
+    } else {
+      const candidates = [
+        path.join(__dirname, '..', '..', 'package.json'),
+        path.join(process.cwd(), 'package.json'),
+      ];
+      packageJsonPath = candidates.find(p => fs.existsSync(p)) || candidates[0];
+    }
+    const pkg = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+    const version = pkg.version || app.getVersion();
+    const buildDate = pkg.buildDate || '';
+    return buildDate ? `${version}-${buildDate}` : version;
+  } catch (err) {
+    return app.getVersion();
+  }
+});
+
 // 获取 VersionCode（用于版本检测和升级）
 ipcMain.handle('get-version-code', () => {
   try {
@@ -678,6 +732,20 @@ ipcMain.handle('get-platform', () => {
   }
 });
 
+// 渲染进程播放调试日志 → 主进程终端（npm run dev 里 [1] electron 那路可见）
+ipcMain.on('wtv-renderer-log', (event, tag, payload) => {
+  try {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    const title = win?.getTitle?.() || '';
+    const extra = payload !== undefined && payload !== null
+      ? (typeof payload === 'string' ? payload : JSON.stringify(payload))
+      : '';
+    console.log('[WTV_PLAY_LOG]', tag, title || '(no-title)', extra);
+  } catch (_) {
+    console.log('[WTV_PLAY_LOG]', tag, payload);
+  }
+});
+
 // 在外部浏览器中打开 URL
 ipcMain.handle('open-external', (event, url) => {
   const { shell } = require('electron');
@@ -691,8 +759,9 @@ ipcMain.handle('open-page-window', (event, pagePath, title) => {
   let pageWindow = new BrowserWindow({
     width: 1000,
     height: 800,
-    minWidth: 800,
-    minHeight: 600,
+    resizable: false, // 禁用调整窗口大小
+    fullscreenable: false, // 禁用全屏功能
+    maximizable: false, // 禁用最大化功能
     title: title || 'WTV',
     backgroundColor: '#0f0f0f',
     autoHideMenuBar: true,
@@ -745,6 +814,7 @@ ipcMain.handle('open-video-window', (event, videoId, videoData) => {
     
     // 更新窗口标题（使用纯视频标题，不带前缀）
     const newTitle = videoData?.title || '视频详情';
+    currentVideoWindowTitle = newTitle;
     videoWindow.setTitle(newTitle);
     // 聚焦窗口
     videoWindow.focus();
@@ -764,6 +834,7 @@ ipcMain.handle('open-video-window', (event, videoId, videoData) => {
   
   // 保存视频数据，供渲染进程通过 IPC 获取
   currentVideoData = videoData;
+  currentVideoWindowTitle = videoData?.title || '视频详情';
   
   // 创建新窗口（比主窗口小，不显示导航栏）
   // 使用视频标题（如果有），避免显示默认的 "看视频 - WTV"
@@ -771,8 +842,9 @@ ipcMain.handle('open-video-window', (event, videoId, videoData) => {
   videoWindow = new BrowserWindow({
     width: 1300,
     height: 850,
-    minWidth: 1100,
-    minHeight: 800,
+    resizable: false, // 禁用调整窗口大小
+    fullscreenable: true, // 允许视频播放器全屏（HTML5 视频全屏需要此选项）
+    maximizable: false, // 禁用最大化功能
     title: initialTitle,
     backgroundColor: '#f5f5f5', // 设置背景色，避免白屏闪烁
     autoHideMenuBar: true,
@@ -789,6 +861,28 @@ ipcMain.handle('open-video-window', (event, videoId, videoData) => {
   if (process.platform === 'win32') {
     videoWindow.setMenuBarVisibility(false);
   }
+
+  // 监听窗口全屏事件，允许视频播放器全屏
+  // HTML5 视频全屏需要 fullscreenable: true
+  // 注意：当 HTML5 视频元素进入全屏时，Electron 窗口不应该跟随进入全屏
+  // 我们只在视频元素退出全屏时确保窗口状态正确
+    videoWindow.on('enter-full-screen', () => {
+      console.log('窗口进入全屏模式');
+      // 允许窗口全屏，不再检测 HTML5 视频元素
+      // HTML5 视频元素的全屏由浏览器自己处理
+    });
+
+  videoWindow.on('leave-full-screen', () => {
+    console.log('窗口退出全屏模式');
+    // 确保窗口状态正确
+    if (videoWindow && !videoWindow.isDestroyed()) {
+      // 如果窗口仍然处于全屏状态，强制退出
+      if (videoWindow.isFullScreen()) {
+        console.log('窗口仍在全屏状态，强制退出');
+        videoWindow.setFullScreen(false);
+      }
+    }
+  });
   
   // 窗口关闭时清空引用并停止标题检查
   videoWindow.on('closed', () => {
@@ -797,8 +891,15 @@ ipcMain.handle('open-video-window', (event, videoId, videoData) => {
     currentVideoData = null; // 窗口关闭时清除视频数据
   });
   
-  // 保存视频标题，用于后续事件处理
-  const videoTitle = videoData?.title || '视频详情';
+  const getExpectedVideoTitle = () => currentVideoWindowTitle || currentVideoData?.title || '视频详情';
+  const applyExpectedVideoTitle = () => {
+    const expectedTitle = getExpectedVideoTitle();
+    if (!videoWindow || videoWindow.isDestroyed()) {
+      return;
+    }
+    videoWindow.setTitle(expectedTitle);
+    videoWindow.webContents.executeJavaScript(`document.title = ${JSON.stringify(expectedTitle)};`).catch(() => {});
+  };
   
   // 使用定时器持续检查和修正标题，直到页面完全加载
   let titleCheckInterval = null;
@@ -807,12 +908,11 @@ ipcMain.handle('open-video-window', (event, videoId, videoData) => {
       clearInterval(titleCheckInterval);
     }
     titleCheckInterval = setInterval(() => {
-      if (videoWindow && !videoWindow.isDestroyed() && videoData?.title) {
+      if (videoWindow && !videoWindow.isDestroyed()) {
+        const expectedTitle = getExpectedVideoTitle();
         const currentTitle = videoWindow.getTitle();
-        if (currentTitle !== videoTitle && currentTitle.includes('看视频')) {
-          videoWindow.setTitle(videoTitle);
-          // 同时修改 document.title
-          videoWindow.webContents.executeJavaScript(`document.title = ${JSON.stringify(videoTitle)};`).catch(() => {});
+        if (currentTitle !== expectedTitle && currentTitle.includes('看视频')) {
+          applyExpectedVideoTitle();
         }
       }
     }, 50); // 每50ms检查一次
@@ -827,34 +927,24 @@ ipcMain.handle('open-video-window', (event, videoId, videoData) => {
   
   // 在页面开始加载时就设置标题，避免闪烁
   videoWindow.webContents.on('did-start-loading', () => {
-    videoWindow.setTitle(videoTitle);
+    applyExpectedVideoTitle();
     startTitleCheck(); // 开始检查标题
   });
   
   // 在 DOM 准备就绪时立即修改 document.title，防止 HTML title 标签生效
   videoWindow.webContents.on('dom-ready', () => {
-    if (videoData?.title) {
-      videoWindow.webContents.executeJavaScript(`document.title = ${JSON.stringify(videoTitle)};`).catch(() => {});
-      videoWindow.setTitle(videoTitle);
-    }
+    applyExpectedVideoTitle();
   });
   
   // 监听页面标题更新，始终阻止并使用视频标题
   videoWindow.webContents.on('page-title-updated', (event) => {
-    if (videoData?.title) {
-      event.preventDefault();
-      videoWindow.setTitle(videoTitle);
-      // 同时修改 document.title，防止后续更新
-      videoWindow.webContents.executeJavaScript(`document.title = ${JSON.stringify(videoTitle)};`).catch(() => {});
-    }
+    event.preventDefault();
+    applyExpectedVideoTitle();
   });
   
   // 在页面加载完成后，再次确保标题正确，然后停止检查
   videoWindow.webContents.on('did-finish-load', () => {
-    if (videoData?.title) {
-      videoWindow.setTitle(videoTitle);
-      videoWindow.webContents.executeJavaScript(`document.title = ${JSON.stringify(videoTitle)};`).catch(() => {});
-    }
+    applyExpectedVideoTitle();
     // 延迟停止检查，确保标题稳定
     setTimeout(() => {
       stopTitleCheck();
@@ -886,7 +976,7 @@ ipcMain.handle('open-video-window', (event, videoId, videoData) => {
     // 开发环境：加载开发服务器 URL，添加 newWindow 参数标识这是新窗口
     const videoUrl = `http://localhost:3000/#/video/${videoId}?newWindow=true`;
     // 在加载前确保标题已设置
-    videoWindow.setTitle(videoTitle);
+    applyExpectedVideoTitle();
     videoWindow.loadURL(videoUrl);
     // 页面加载完成后，将 videoData 存储到 sessionStorage，供渲染进程使用
     videoWindow.webContents.once('did-finish-load', () => {
@@ -918,16 +1008,13 @@ ipcMain.handle('open-video-window', (event, videoId, videoData) => {
     }
     
     // 在加载前确保标题已设置
-    videoWindow.setTitle(videoTitle);
+    applyExpectedVideoTitle();
     // 使用 loadFile 加载，然后设置 hash，添加 newWindow 参数标识这是新窗口
     videoWindow.loadFile(indexPath).then(() => {
       // 加载完成后设置 hash
       videoWindow.webContents.executeJavaScript(`window.location.hash = '#/video/${videoId}?newWindow=true';`);
       // 确保标题正确（可能在 loadFile 后被 HTML title 覆盖）
-      if (videoData?.title) {
-        videoWindow.webContents.executeJavaScript(`document.title = ${JSON.stringify(videoTitle)};`).catch(() => {});
-        videoWindow.setTitle(videoTitle);
-      }
+      applyExpectedVideoTitle();
     }).catch(err => {
       console.error('加载视频详情页失败:', err);
     });
@@ -936,10 +1023,132 @@ ipcMain.handle('open-video-window', (event, videoId, videoData) => {
   return videoWindow.id;
 });
 
+// 创建新窗口打开视频播放页（只保留一个播放窗口）
+ipcMain.handle('open-player-window', (event, videoId, videoData, episodeNumber) => {
+  const isDevelopment = !app.isPackaged && process.env.NODE_ENV !== 'production';
+  const finalEpisodeNumber = episodeNumber || videoData?.autoPlayEpisode || '';
+  const queryParts = ['newWindow=true', 'playerWindow=true', 'autoplay=true'];
+  if (finalEpisodeNumber !== '' && finalEpisodeNumber !== null && finalEpisodeNumber !== undefined) {
+    queryParts.push(`autoplayEpisode=${encodeURIComponent(finalEpisodeNumber)}`);
+  }
+  const query = queryParts.join('&');
+
+  if (playerWindow && !playerWindow.isDestroyed()) {
+    currentPlayerVideoData = {
+      ...(videoData || {}),
+      autoPlayEpisode: finalEpisodeNumber || null,
+    };
+
+    const newTitle = videoData?.title ? `${videoData.title} - 播放` : '视频播放';
+    playerWindow.setTitle(newTitle);
+    if (playerWindow.isMinimized()) {
+      playerWindow.restore();
+    }
+    if (!playerWindow.isVisible()) {
+      playerWindow.show();
+    }
+    playerWindow.focus();
+
+    if (isDevelopment) {
+      playerWindow.loadURL(`http://localhost:3000/#/video/${videoId}?${query}`);
+    } else {
+      playerWindow.webContents.executeJavaScript(`window.location.hash = '#/video/${videoId}?${query}';`);
+    }
+
+    return playerWindow.id;
+  }
+
+  currentPlayerVideoData = {
+    ...(videoData || {}),
+    autoPlayEpisode: finalEpisodeNumber || null,
+  };
+
+  const initialTitle = videoData?.title ? `${videoData.title} - 播放` : '视频播放';
+  playerWindow = new BrowserWindow({
+    width: 1300,
+    height: 850,
+    resizable: false,
+    fullscreenable: true,
+    maximizable: false,
+    title: initialTitle,
+    backgroundColor: '#0f0f0f',
+    autoHideMenuBar: true,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      nodeIntegration: false,
+      contextIsolation: true,
+      webSecurity: false,
+      session: session.defaultSession,
+    },
+  });
+
+  if (process.platform === 'win32') {
+    playerWindow.setMenuBarVisibility(false);
+  }
+
+  playerWindow.on('closed', () => {
+    playerWindow = null;
+    currentPlayerVideoData = null;
+  });
+
+  playerWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.key === 'F5') {
+      event.preventDefault();
+      return;
+    }
+
+    if ((input.control || input.meta) && input.key.toLowerCase() === 'r') {
+      event.preventDefault();
+      return;
+    }
+  });
+
+  playerWindow.webContents.on('context-menu', (event) => {
+    event.preventDefault();
+  });
+
+  if (isDevelopment) {
+    playerWindow.loadURL(`http://localhost:3000/#/video/${videoId}?${query}`);
+  } else {
+    const appPath = app.getAppPath();
+    let indexPath;
+
+    if (app.isPackaged) {
+      indexPath = path.join(appPath, 'src', 'renderer', 'build', 'index.html');
+      if (!fs.existsSync(indexPath)) {
+        indexPath = path.join(appPath, 'renderer', 'build', 'index.html');
+      }
+      if (!fs.existsSync(indexPath)) {
+        indexPath = path.join(appPath, 'build', 'index.html');
+      }
+    } else {
+      indexPath = path.join(__dirname, '..', 'renderer', 'build', 'index.html');
+    }
+
+    playerWindow.loadFile(indexPath).then(() => {
+      playerWindow.webContents.executeJavaScript(`window.location.hash = '#/video/${videoId}?${query}';`);
+    }).catch(err => {
+      console.error('加载视频播放页失败:', err);
+    });
+  }
+
+  if (!playerWindow.isVisible()) {
+    playerWindow.show();
+  }
+  playerWindow.focus();
+
+  return playerWindow.id;
+});
+
 // 更新视频窗口标题
 ipcMain.handle('update-video-window-title', (event, title) => {
-  if (videoWindow && !videoWindow.isDestroyed()) {
-    videoWindow.setTitle(title);
+  const senderWindow = BrowserWindow.fromWebContents(event.sender);
+  if (senderWindow && !senderWindow.isDestroyed()) {
+    if (videoWindow && !videoWindow.isDestroyed() && senderWindow.id === videoWindow.id) {
+      currentVideoWindowTitle = title;
+    }
+    senderWindow.setTitle(title);
+    senderWindow.webContents.executeJavaScript(`document.title = ${JSON.stringify(title)};`).catch(() => {});
     return true;
   }
   return false;
@@ -947,12 +1156,277 @@ ipcMain.handle('update-video-window-title', (event, title) => {
 
 // 获取当前视频窗口的视频数据
 ipcMain.handle('get-video-data', (event) => {
-  // 只允许从视频窗口获取数据
   if (videoWindow && !videoWindow.isDestroyed() && event.sender === videoWindow.webContents) {
-    const data = currentVideoData;
-    // 不立即清除数据，因为页面可能需要多次获取（例如在 useEffect 中）
-    // 数据会在窗口关闭或打开新视频时被覆盖
-    return data;
+    return currentVideoData;
+  }
+  if (playerWindow && !playerWindow.isDestroyed() && event.sender === playerWindow.webContents) {
+    return currentPlayerVideoData;
   }
   return null;
+});
+
+// 安全删除文件的辅助函数
+const safeUnlinkSync = (filePath) => {
+  try {
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+  } catch (error) {
+    console.warn('删除文件失败:', filePath, error.message);
+  }
+};
+
+// 下载更新文件
+ipcMain.handle('download-update', async (event, downloadUrl, fileName) => {
+  return new Promise((resolve, reject) => {
+    try {
+      // 确定下载目录（用户下载目录）
+      const userDataPath = app.getPath('downloads');
+      const filePath = path.join(userDataPath, fileName || `update-${Date.now()}.exe`);
+      
+      console.log('开始下载更新文件:', downloadUrl);
+      console.log('保存路径:', filePath);
+      
+      // 获取发送请求的窗口
+      const senderWindow = BrowserWindow.fromWebContents(event.sender);
+      const targetWindow = senderWindow || mainWindow;
+      
+      // 选择使用 http 或 https
+      const urlObj = new URL(downloadUrl);
+      const client = urlObj.protocol === 'https:' ? https : http;
+      
+      // 创建文件写入流，设置更大的缓冲区以提高性能
+      const file = fs.createWriteStream(filePath, {
+        highWaterMark: 1024 * 1024 * 2 // 2MB 缓冲区，提高写入性能
+      });
+      
+      let downloadedBytes = 0;
+      let totalBytes = 0;
+      let lastUpdateTime = Date.now();
+      let lastDownloadedBytes = 0;
+      let lastProgressUpdateTime = Date.now();
+      let isCompleted = false;
+      
+      // 监听文件写入完成事件
+      file.on('finish', () => {
+        if (!isCompleted) {
+          isCompleted = true;
+          console.log('文件写入完成:', filePath);
+          // 验证文件是否存在且有内容
+          try {
+            const stats = fs.statSync(filePath);
+            if (stats.size > 0) {
+              resolve({
+                success: true,
+                filePath: filePath,
+                totalBytes: stats.size
+              });
+            } else {
+              reject(new Error('下载的文件为空'));
+            }
+          } catch (err) {
+            reject(new Error('无法验证下载文件: ' + err.message));
+          }
+        }
+      });
+      
+      // 配置请求选项，优化下载性能
+      const requestOptions = {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': '*/*',
+          'Accept-Encoding': 'gzip, deflate, br',
+          'Connection': 'keep-alive'
+        },
+        timeout: 30000, // 30秒超时
+        agent: false // 不使用代理，直接连接
+      };
+      
+      const request = client.get(downloadUrl, requestOptions, (response) => {
+        // 检查响应状态码
+        if (response.statusCode !== 200) {
+          file.destroy();
+          safeUnlinkSync(filePath);
+          reject(new Error(`下载失败，HTTP 状态码: ${response.statusCode}`));
+          return;
+        }
+        
+        // 获取文件总大小
+        totalBytes = parseInt(response.headers['content-length'] || '0', 10);
+        
+        console.log('文件总大小:', totalBytes, 'bytes');
+        
+        // 如果没有 Content-Length，无法显示进度，但仍然可以下载
+        if (totalBytes === 0) {
+          console.warn('服务器未提供 Content-Length，无法显示准确进度');
+        }
+        
+        // 直接监听数据流，减少 Transform 流的开销，提高下载速度
+        // 使用 response.on('data') 直接处理数据，然后写入文件
+        response.on('data', (chunk) => {
+          downloadedBytes += chunk.length;
+          
+          // 异步写入文件，不阻塞数据接收
+          if (!file.write(chunk)) {
+            // 如果缓冲区已满，暂停响应流
+            response.pause();
+            file.once('drain', () => {
+              response.resume();
+            });
+          }
+          
+          // 计算下载速度（每0.5秒更新一次）
+          const now = Date.now();
+          const timeDiff = (now - lastUpdateTime) / 1000; // 秒
+          let speed = 0;
+          
+          // 只在0.5秒间隔时计算和更新速度
+          if (timeDiff >= 0.5) {
+            speed = (downloadedBytes - lastDownloadedBytes) / timeDiff;
+            lastUpdateTime = now;
+            lastDownloadedBytes = downloadedBytes;
+          }
+          
+          // 节流：每0.5秒发送一次进度更新，避免闪烁
+          // 但如果接近完成（>95%），立即更新以确保显示100%
+          const progressUpdateInterval = 500; // 500毫秒 = 0.5秒
+          const timeSinceLastProgressUpdate = now - lastProgressUpdateTime;
+          const progress = totalBytes > 0 ? (downloadedBytes / totalBytes) * 100 : 0;
+          
+          // 如果进度接近完成（>95%）或超过更新间隔，发送进度更新
+          if (progress >= 95 || timeSinceLastProgressUpdate >= progressUpdateInterval) {
+            // 发送进度更新到渲染进程
+            if (targetWindow && !targetWindow.isDestroyed()) {
+              targetWindow.webContents.send('download-progress', {
+                progress: Math.min(progress, 100),
+                downloaded: downloadedBytes,
+                total: totalBytes,
+                speed: speed // 只在速度更新时发送新速度，否则发送0
+              });
+            }
+            lastProgressUpdateTime = now;
+          }
+        });
+        
+        // 监听响应结束（数据流结束）
+        response.on('end', () => {
+          console.log('响应流结束，已下载:', downloadedBytes, 'bytes');
+          
+          // 发送最终进度更新（100%）
+          if (targetWindow && !targetWindow.isDestroyed()) {
+            targetWindow.webContents.send('download-progress', {
+              progress: 100,
+              downloaded: downloadedBytes,
+              total: totalBytes,
+              speed: 0
+            });
+          }
+          
+          // 结束文件写入流，触发 file.on('finish') 事件
+          file.end();
+          // 不在这里 resolve，等待 file.on('finish') 事件
+        });
+        
+        // 监听错误
+        response.on('error', (error) => {
+          if (!isCompleted) {
+            isCompleted = true;
+            file.destroy();
+            safeUnlinkSync(filePath); // 删除不完整的文件
+            console.error('下载响应错误:', error);
+            reject(error);
+          }
+        });
+      });
+      
+      // 监听请求错误
+      request.on('error', (error) => {
+        if (!isCompleted) {
+          isCompleted = true;
+          file.destroy();
+          safeUnlinkSync(filePath); // 删除不完整的文件
+          console.error('下载请求错误:', error);
+          reject(error);
+        }
+      });
+      
+      // 监听文件写入错误
+      file.on('error', (error) => {
+        if (!isCompleted) {
+          isCompleted = true;
+          request.destroy();
+          safeUnlinkSync(filePath); // 删除不完整的文件
+          console.error('文件写入错误:', error);
+          reject(error);
+        }
+      });
+      
+      // 设置超时（30分钟）
+      const timeout = setTimeout(() => {
+        if (!isCompleted) {
+          isCompleted = true;
+          request.destroy();
+          file.destroy();
+          safeUnlinkSync(filePath);
+          reject(new Error('下载超时'));
+        }
+      }, 30 * 60 * 1000);
+      
+      // 清理超时
+      file.on('finish', () => clearTimeout(timeout));
+      file.on('error', () => clearTimeout(timeout));
+      request.on('error', () => clearTimeout(timeout));
+      
+    } catch (error) {
+      console.error('下载过程出错:', error);
+      reject(error);
+    }
+  });
+});
+
+// 安装更新文件
+ipcMain.handle('install-update', async (event, filePath) => {
+  try {
+    console.log('开始安装更新文件:', filePath);
+    
+    // 检查文件是否存在
+    if (!fs.existsSync(filePath)) {
+      throw new Error('更新文件不存在');
+    }
+    
+    // 使用 shell.openPath 打开文件（Windows 会自动运行安装程序）
+    const { shell } = require('electron');
+    await shell.openPath(filePath);
+    
+    console.log('已打开安装程序');
+    
+    // 延迟退出应用，给用户时间看到安装程序启动
+    setTimeout(() => {
+      app.quit();
+    }, 1000);
+    
+    return { success: true };
+  } catch (error) {
+    console.error('安装更新失败:', error);
+    throw error;
+  }
+});
+
+// 检查窗口是否处于全屏状态
+ipcMain.handle('is-full-screen', (event) => {
+  const senderWindow = BrowserWindow.fromWebContents(event.sender);
+  if (senderWindow && !senderWindow.isDestroyed()) {
+    return senderWindow.isFullScreen();
+  }
+  return false;
+});
+
+// 设置窗口全屏状态
+ipcMain.handle('set-full-screen', (event, flag) => {
+  const senderWindow = BrowserWindow.fromWebContents(event.sender);
+  if (senderWindow && !senderWindow.isDestroyed()) {
+    senderWindow.setFullScreen(flag);
+    return true;
+  }
+  return false;
 });

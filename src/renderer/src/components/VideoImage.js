@@ -1,6 +1,6 @@
 // components/VideoImage.js
 import React, { useState, useEffect, useRef } from 'react';
-import { cacheImage } from '../utils/imageCache';
+// 🔧 视频封面图片不缓存，移除 cacheImage 和 getCachedImage 导入
 
 // 简单的SVG占位图（base64编码）
 const PLACEHOLDER_SVG = 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMzAwIiBoZWlnaHQ9IjQwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwJSIgaGVpZ2h0PSIxMDAlIiBmaWxsPSIjZjBmMGYwIi8+PHRleHQgeD0iNTAlIiB5PSI1MCUiIGZvbnQtZmFtaWx5PSJBcmlhbCwgc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxNCIgZmlsbD0iIzk5OTk5OSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZHk9Ii4zZW0iPuaXoOazleWKoOi9veWbvueJhzwvdGV4dD48L3N2Zz4=';
@@ -24,7 +24,7 @@ const VideoImage = ({ src, alt, className = '' }) => {
     }
   };
 
-  // 初始化状态：如果src有效则使用src，否则使用占位图
+  // 初始化状态
   const [imgSrc, setImgSrc] = useState(() => {
     if (src && isValidUrl(src)) {
       return src;
@@ -38,16 +38,19 @@ const VideoImage = ({ src, alt, className = '' }) => {
     return !src || !isValidUrl(src);
   });
   const [retryCount, setRetryCount] = useState(0);
+  
   const timeoutRef = useRef(null); // 超时定时器引用
+  const lastSrcRef = useRef(null); // 记录上次的 src
 
-  const handleError = (e) => {
+  // 处理图片加载错误
+  const handleError = async (e) => {
     // 清除超时定时器
     if (timeoutRef.current) {
       clearTimeout(timeoutRef.current);
       timeoutRef.current = null;
     }
     
-    console.warn('图片加载失败:', imgSrc, '重试次数:', retryCount);
+    console.warn('❌ 图片加载失败:', imgSrc, '重试次数:', retryCount, '原始URL:', src);
     
     // 如果当前已经是占位图，不再处理
     if (imgSrc === PLACEHOLDER_SVG) {
@@ -56,26 +59,22 @@ const VideoImage = ({ src, alt, className = '' }) => {
       return;
     }
     
-    // 如果还没重试过，且原始URL有效，尝试重新加载
-    if (retryCount < 1 && isValidUrl(src) && (imgSrc === src || imgSrc.startsWith(src))) {
+    // 🔧 视频封面图片不缓存，如果加载失败，直接重试原始 URL
+    // 如果还没重试过，且原始URL有效，尝试重新加载原始 URL
+    if (retryCount < 1 && isValidUrl(src)) {
       setRetryCount(prev => prev + 1);
-      // 延迟后重试，可能是网络问题
+      
+      // 延迟后重试
       setTimeout(() => {
-        // 清除之前的超时定时器
-        if (timeoutRef.current) {
-          clearTimeout(timeoutRef.current);
-          timeoutRef.current = null;
-        }
-        
-        // 尝试移除 crossOrigin 属性重试
-        const retrySrc = src + (src.includes('?') ? '&' : '?') + '_retry=' + Date.now();
-        setImgSrc(retrySrc);
+        console.log('重试加载图片:', src);
+        setImgSrc(src);
         setIsLoading(true);
         setHasError(false);
         
-        // 重试时也设置30秒超时
+        // 设置超时
         timeoutRef.current = setTimeout(() => {
-          console.warn('图片重试加载超时（30秒）:', retrySrc);
+          console.warn('图片重试加载超时:', src);
+          // 🔧 视频封面图片不缓存，超时后使用占位图
           setImgSrc(PLACEHOLDER_SVG);
           setHasError(true);
           setIsLoading(false);
@@ -86,11 +85,12 @@ const VideoImage = ({ src, alt, className = '' }) => {
     }
     
     // 如果重试失败或URL无效，使用占位图
-      setImgSrc(PLACEHOLDER_SVG);
-      setHasError(true);
+    setImgSrc(PLACEHOLDER_SVG);
+    setHasError(true);
     setIsLoading(false);
   };
 
+  // 处理图片加载成功
   const handleLoad = async () => {
     // 清除超时定时器
     if (timeoutRef.current) {
@@ -102,37 +102,37 @@ const VideoImage = ({ src, alt, className = '' }) => {
     setHasError(false);
     setRetryCount(0);
     
-    // 图片加载成功后，缓存图片
-    if (src && isValidUrl(src) && imgSrc === src) {
-      // 异步缓存，不阻塞渲染
-      cacheImage(src).catch(error => {
-        console.warn('缓存图片失败:', error, src);
-      });
-    }
+    // 🔧 视频封面图片不缓存，每次启动都重新下载
+    // 不再调用 cacheImage，图片直接从原始 URL 加载
   };
 
-  // 如果src变化，重置状态
+  // 当 src 变化时，重置状态并尝试加载
   useEffect(() => {
+    lastSrcRef.current = src;
+
     if (src && isValidUrl(src)) {
+      // 🔧 视频封面图片不缓存，直接使用原始 URL
       setImgSrc(src);
       setIsLoading(true);
       setHasError(false);
       setRetryCount(0);
     } else {
+      // URL 无效，使用占位图
       setImgSrc(PLACEHOLDER_SVG);
       setIsLoading(false);
       setHasError(true);
     }
+
+    // 清理函数
+    return () => {
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+        timeoutRef.current = null;
+      }
+    };
   }, [src]);
 
   const finalSrc = isValidUrl(imgSrc) ? imgSrc : PLACEHOLDER_SVG;
-
-  // 调试日志
-  useEffect(() => {
-    if (src) {
-      console.log('VideoImage - src:', src, 'imgSrc:', imgSrc, 'finalSrc:', finalSrc, 'isValidUrl:', isValidUrl(src));
-    }
-  }, [src, imgSrc, finalSrc]);
 
   return (
     <div className={`video-image-wrapper ${className}`} style={{ position: 'relative', width: '100%', height: '100%', overflow: 'hidden', backgroundColor: (isLoading || hasError) ? '#f0f0f0' : 'transparent' }}>
@@ -181,7 +181,7 @@ const VideoImage = ({ src, alt, className = '' }) => {
           WebkitBackfaceVisibility: 'hidden',
           backfaceVisibility: 'hidden'
         }}
-        loading={className.includes('video-poster-image') ? 'eager' : 'lazy'}
+        loading="eager"
         decoding="async"
         referrerPolicy="no-referrer"
       />
@@ -190,4 +190,3 @@ const VideoImage = ({ src, alt, className = '' }) => {
 };
 
 export default VideoImage;
-

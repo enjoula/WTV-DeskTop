@@ -1,0 +1,19 @@
+.DS_Store
+
+# Dependencies
+node_modules/
+src/renderer/node_modules/
+
+# Build outputs
+dist/
+src/renderer/build/
+
+# Caches
+.cache/
+node_modules/.cache/
+src/renderer/node_modules/.cache/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

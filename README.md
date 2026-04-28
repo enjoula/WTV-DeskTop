@@ -96,9 +96,9 @@ WTV-DeskTop/
 │       └── package.json      # React 应用依赖
 ├── build/                    # 构建资源
 │   └── logo.svg             # 应用图标
-├── dist/                     # 打包输出目录
-│   ├── mac/                 # Mac 平台打包文件
-│   └── windows/             # Windows 平台打包文件
+├── dist/                     # 打包输出目录（构建产物，不提交）
+│   ├── mac/                 # Mac 平台打包文件（build:all / build:mac）
+│   └── windows/             # Windows 平台打包文件（build:all / build:win）
 ├── build-all.js             # 一键打包脚本
 ├── package.json             # 项目配置文件
 └── README.md               # 项目文档
@@ -125,14 +125,12 @@ cd WTV-DeskTop
 ### 2. 安装依赖
 
 ```bash
-# 安装主进程和打包工具依赖
+# 安装所有依赖（根项目 + src/renderer workspace）
 npm install
-
-# 安装渲染进程（React）依赖
-cd src/renderer
-npm install
-cd ../..
 ```
+
+> 提示：`node_modules`、`dist`、`src/renderer/build`、缓存目录均已通过 `.gitignore` 忽略，不建议提交到仓库。
+> 提示：项目已启用 npm workspaces，`src/renderer` 依赖由根目录统一安装和锁定。
 
 ### 3. 启动开发环境
 
@@ -170,7 +168,7 @@ npm run electron-dev   # 只启动 Electron（监听 main 进程文件变化）
 
 # 构建相关
 npm run build:react    # 构建 React 应用
-npm run build          # 使用 electron-builder 打包（当前平台）
+npm run build          # 使用 electron-builder 打包（当前平台，默认输出到 dist/）
 npm run pack           # 打包但不生成安装包（仅目录）
 npm run dist           # 生成分发包
 
@@ -193,6 +191,7 @@ npm run build:win      # 只打包 Windows 平台
 - 路由配置：`Routes.js`
 - API 客户端：`src/api/client.js`
 - 状态管理：`src/store/`
+
 
 #### API 配置
 - 开发环境：通过 `setupProxy.js` 代理到后端服务器
@@ -228,7 +227,7 @@ npm run build:win
 
 ### 打包输出
 
-打包完成后，文件会按平台分别存放：
+打包完成后，文件会按平台分别存放（使用 `build:all` / `build:mac` / `build:win`）：
 
 ```
 dist/
@@ -253,7 +252,7 @@ dist/
 
 1. 确保 React 应用已构建：`npm run build:react`
 2. 检查 `package.json` 中的版本号
-3. 确保应用图标文件存在：`build/logo.svg`
+3. 确保应用图标文件存在：`build/icons/icon.png`（Windows）与 `build/icon.icns`（macOS）
 
 ### 高级选项
 

@@ -1,16 +1,16 @@
 // pages/Login.js
 import React, { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useDispatch, useSelector } from 'react-redux';
 import { loginUser, fetchCurrentUser } from '../store/authSlice';
 import { fetchMovies, fetchTVShows, fetchAnime } from '../store/videoSlice';
-import { fetchFavorites } from '../store/favoriteSlice';
 
 const Login = () => {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const dispatch = useDispatch();
   const navigate = useNavigate();
+  const location = useLocation();
   const { loading, error, isAuthenticated } = useSelector(state => state.auth);
 
   useEffect(() => {
@@ -20,16 +20,34 @@ const Login = () => {
       dispatch(fetchMovies({ page: 1, size: 10 }));
       dispatch(fetchTVShows({ page: 1, size: 10 }));
       dispatch(fetchAnime({ page: 1, size: 10 }));
-      // 获取用户信息和收藏列表
+      // 获取用户信息
       dispatch(fetchCurrentUser());
-      dispatch(fetchFavorites());
-      
+      // 不再自动获取收藏列表，只在用户进入收藏列表页面时获取
+
+      // 登录成功后优先回到来源页面（如视频详情页），否则回首页
+      const from = location.state?.from;
+      const fallbackRedirect = sessionStorage.getItem('postLoginRedirect');
+      let redirectTarget = '/';
+      if (typeof from === 'string' && from) {
+        redirectTarget = from;
+      } else if (from && typeof from === 'object') {
+        const pathname = from.pathname || '/';
+        const search = from.search || '';
+        const hash = from.hash || '';
+        redirectTarget = `${pathname}${search}${hash}`;
+      } else if (fallbackRedirect && fallbackRedirect.startsWith('/')) {
+        // 兜底：处理全局 401 跳转到登录页的场景，保持回到当前详情页
+        redirectTarget = fallbackRedirect;
+      }
+
+      sessionStorage.removeItem('postLoginRedirect');
+
       // 延迟跳转，确保数据已刷新
       setTimeout(() => {
-      navigate('/');
+        navigate(redirectTarget, { replace: true });
       }, 100);
     }
-  }, [isAuthenticated, navigate, dispatch]);
+  }, [isAuthenticated, navigate, dispatch, location.state]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -39,7 +57,7 @@ const Login = () => {
     // 登录成功后，立即获取用户信息
     if (result.type === 'auth/loginUser/fulfilled') {
       dispatch(fetchCurrentUser());
-      dispatch(fetchFavorites());
+      // 不再自动获取收藏列表，只在用户进入收藏列表页面时获取
     }
   };
 

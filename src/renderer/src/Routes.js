@@ -1,6 +1,6 @@
 // Routes.js
 import React from 'react';
-import { Routes, Route, useLocation } from 'react-router-dom';
+import { Routes, Route, useLocation, Navigate } from 'react-router-dom';
 import Header from './components/Header';
 import Footer from './components/Footer';
 import Home from './pages/Home';
@@ -30,11 +30,12 @@ function RoutesComponent() {
   }, [location]);
   
   return (
-    <div className="app-container">
+    <div className={`app-container ${isNewWindow ? 'app-container-no-header' : ''}`}>
       {!isNewWindow && <Header />}
-      <main className="main-content">
+      <main className={`main-content ${isNewWindow ? 'main-content-no-header' : ''}`}>
         <Routes>
-          <Route path="/" element={<Home />} />
+          <Route path="/" element={<Navigate to="/videos/movies" replace />} />
+          <Route path="/home" element={<Home />} />
           <Route path="/login" element={<Login />} />
           <Route path="/register" element={<Register />} />
           <Route path="/videos/:category" element={<VideoList />} />

@@ -4,10 +4,13 @@ import { HashRouter as Router } from 'react-router-dom';
 import store from './store';
 import Routes from './Routes';
 import { fetchAllFilters } from './store/videoSlice';
+import { setToken, clearAuth, fetchCurrentUser } from './store/authSlice';
 import { checkUpdate } from './api/app';
 import UpdateDialog from './components/UpdateDialog';
 import LoginDialog from './components/LoginDialog';
 import { getDevicePlatformAsync } from './utils/platform';
+import { syncFromPlayHistory } from './utils/playlist';
+import { setPlaylist } from './store/videoSlice';
 import './App.css';
 
 function App() {
@@ -17,6 +20,14 @@ function App() {
   const [updateInfo, setUpdateInfo] = React.useState(null);
   const [isForceUpdate, setIsForceUpdate] = React.useState(false);
   const [showUpdateDialog, setShowUpdateDialog] = React.useState(false);
+  // 后台下载状态管理
+  const [downloadState, setDownloadState] = React.useState('idle'); // idle, downloading, completed, error
+  const [downloadedFilePath, setDownloadedFilePath] = React.useState(null);
+  const [downloadProgress, setDownloadProgress] = React.useState(0);
+  const [downloadedBytes, setDownloadedBytes] = React.useState(0);
+  const [totalBytes, setTotalBytes] = React.useState(0);
+  const [downloadSpeed, setDownloadSpeed] = React.useState(0);
+  const [downloadErrorMessage, setDownloadErrorMessage] = React.useState(null);
   
   // 登录弹窗状态
   const [showLoginDialog, setShowLoginDialog] = React.useState(false);
@@ -24,9 +35,125 @@ function App() {
     message: '',
     type: 'info',
     showCancel: true,
+    showExtra: false,
+    confirmText: '去登录',
+    cancelText: '取消',
+    extraText: '去注册',
     onConfirm: null,
-    onCancel: null
+    onCancel: null,
+    onExtra: null,
   });
+
+  // 检查今天是否已经提醒过非强制更新
+  const shouldShowNonForceUpdateToday = React.useCallback((isForce) => {
+    // 强制更新：每次检测到都要提示
+    if (isForce) {
+      console.log('强制更新，需要立即提示');
+      return true;
+    }
+    
+    // 非强制更新：检查今天是否已经提醒过
+    const today = new Date().toDateString(); // 获取今天的日期字符串，例如 "Mon Jan 01 2024"
+    const lastRemindDate = localStorage.getItem('lastNonForceUpdateRemindDate');
+    
+    // 如果今天还没有提醒过，返回 true
+    if (lastRemindDate !== today) {
+      // 更新最后提醒日期
+      localStorage.setItem('lastNonForceUpdateRemindDate', today);
+      console.log('今天首次检测到非强制更新，需要提示');
+      return true;
+    }
+    
+    console.log('今天已经提醒过非强制更新，跳过提示');
+    return false;
+  }, []);
+
+  // 后台静默下载更新
+  const handleBackgroundDownload = React.useCallback(async (downloadUrl, fileName) => {
+    if (!window.electronAPI || !window.electronAPI.downloadUpdate) {
+      console.error('下载 API 不可用');
+      setDownloadState('error');
+      setDownloadErrorMessage('下载功能不可用');
+      // 🔧 下载失败时不显示弹窗，避免黑屏
+      setShowUpdateDialog(false);
+      return;
+    }
+
+    try {
+      // 🔧 确保下载过程中不显示弹窗
+      setShowUpdateDialog(false);
+      setDownloadState('downloading');
+      setDownloadProgress(0);
+      setDownloadedBytes(0);
+      setTotalBytes(0);
+      setDownloadErrorMessage(null);
+
+      console.log('开始后台静默下载更新文件:', downloadUrl);
+      const result = await window.electronAPI.downloadUpdate(downloadUrl, fileName);
+
+      if (result.success) {
+        setDownloadState('completed');
+        setDownloadedFilePath(result.filePath);
+        setDownloadProgress(100);
+        console.log('后台下载完成，文件路径:', result.filePath);
+        // 🔧 下载完成后，由 useEffect 自动显示弹窗
+      } else {
+        throw new Error('下载失败');
+      }
+    } catch (error) {
+      console.error('后台下载失败:', error);
+      setDownloadState('error');
+      setDownloadErrorMessage(error.message || '下载失败，请重试');
+      // 🔧 下载失败时，只有强制更新才显示弹窗
+      // 非强制更新不显示，避免影响用户体验
+    }
+  }, []);
+
+  // 监听下载进度
+  React.useEffect(() => {
+    if (!window.electronAPI || !window.electronAPI.onDownloadProgress) {
+      return;
+    }
+
+    const cleanup = window.electronAPI.onDownloadProgress((data) => {
+      console.log('收到下载进度:', data);
+      setDownloadProgress(data.progress || 0);
+      setDownloadedBytes(data.downloaded || 0);
+      setTotalBytes(data.total || 0);
+      if (data.speed !== undefined && data.speed !== null && data.speed > 0) {
+        setDownloadSpeed(data.speed);
+      }
+    });
+
+    return cleanup;
+  }, []);
+
+  // 跨窗口同步登录态：其他窗口登录/登出后，当前窗口自动同步
+  React.useEffect(() => {
+    const handleStorage = (event) => {
+      if (event.key !== 'token') {
+        return;
+      }
+
+      const nextToken = event.newValue || null;
+      const currentToken = store.getState().auth?.token || null;
+      if (nextToken === currentToken) {
+        return;
+      }
+
+      if (nextToken) {
+        store.dispatch(setToken(nextToken));
+        store.dispatch(fetchCurrentUser()).catch(() => {});
+      } else {
+        store.dispatch(clearAuth());
+      }
+    };
+
+    window.addEventListener('storage', handleStorage);
+    return () => {
+      window.removeEventListener('storage', handleStorage);
+    };
+  }, []);
 
   // 检查应用更新
   const handleCheckUpdate = React.useCallback(async (currentVersionCode, currentPlatform) => {
@@ -64,7 +191,7 @@ function App() {
       console.log('提取的更新数据:', updateData);
       
       if (updateData && updateData.has_update) {
-        console.log('检测到更新，准备显示对话框');
+        console.log('检测到更新，开始后台静默下载');
         
         // 处理 is_force 字段，支持多种格式：布尔值、字符串 "true"/"1"、数字 1
         let isForce = false;
@@ -102,38 +229,31 @@ function App() {
           file_size: updateData.file_size
         };
         
-        console.log('设置更新信息:', info);
+        // 设置更新信息（但不显示弹窗）
+        setUpdateInfo(info);
+        setIsForceUpdate(isForce);
+        // 🔧 确保下载过程中不显示弹窗
+        setShowUpdateDialog(false);
+        setDownloadState('idle'); // 重置下载状态
         
-        // 对于强制更新，直接设置状态，不需要等待 showUpdateDialog
-        // 对于非强制更新，需要设置 showUpdateDialog
-        if (isForce) {
-          console.log('检测到强制更新，直接设置状态');
-          // 强制更新：先设置 updateInfo 和 isForceUpdate，确保对话框能显示
-          setUpdateInfo(info);
-          setIsForceUpdate(true);
-          // 强制更新时，showUpdateDialog 可以设置为 true 也可以不设置
-          // 因为渲染条件会检查 isForceUpdate && updateInfo
-          setShowUpdateDialog(true);
-          console.log('强制更新状态已设置: updateInfo=', !!info, 'isForceUpdate=true');
-        } else {
-          // 非强制更新：正常设置所有状态
-          setUpdateInfo(info);
-          setIsForceUpdate(false);
-          setShowUpdateDialog(true);
-          console.log('非强制更新状态已设置: showUpdateDialog=true');
-        }
+        // 立即开始后台静默下载
+        const url = new URL(updateData.download_url);
+        const fileName = url.pathname.split('/').pop() || `update-${updateData.version_name || Date.now()}.exe`;
+        console.log('开始后台下载，文件名:', fileName);
+        handleBackgroundDownload(updateData.download_url, fileName);
       } else {
         console.log('当前已是最新版本，has_update:', updateData?.has_update);
         // 确保没有更新时，清除更新状态
         setUpdateInfo(null);
         setIsForceUpdate(false);
         setShowUpdateDialog(false);
+        setDownloadState('idle');
       }
     } catch (error) {
       console.error('检查更新失败:', error);
       console.error('错误详情:', error.response?.data || error.message);
     }
-  }, []);
+  }, [shouldShowNonForceUpdateToday, handleBackgroundDownload]);
 
   // 全局登录弹窗显示方法
   React.useEffect(() => {
@@ -144,16 +264,25 @@ function App() {
           message: config.message || '您还未登录，请先登录。',
           type: config.type || 'info',
           showCancel: config.showCancel !== false,
+          showExtra: config.showExtra === true,
+          confirmText: config.confirmText || '去登录',
+          cancelText: config.cancelText || '取消',
+          extraText: config.extraText || '去注册',
           onConfirm: () => {
             setShowLoginDialog(false);
-            resolve(true);
+            resolve(config.confirmValue !== undefined ? config.confirmValue : true);
             if (config.onConfirm) config.onConfirm();
           },
           onCancel: () => {
             setShowLoginDialog(false);
-            resolve(false);
+            resolve(config.cancelValue !== undefined ? config.cancelValue : false);
             if (config.onCancel) config.onCancel();
-          }
+          },
+          onExtra: () => {
+            setShowLoginDialog(false);
+            resolve(config.extraValue !== undefined ? config.extraValue : 'extra');
+            if (config.onExtra) config.onExtra();
+          },
         });
         setShowLoginDialog(true);
       });
@@ -223,13 +352,32 @@ function App() {
       });
     }
     
-    // 应用启动时获取所有筛选条件
+    // 应用启动时获取所有筛选条件（只获取一次，防止 React.StrictMode 重复调用）
+    const filtersState = store.getState().video.allFilters;
+    if (!filtersState.loading && (!filtersState.data || Object.keys(filtersState.data).length === 0)) {
     console.log('App 初始化 - 开始获取所有筛选条件');
     store.dispatch(fetchAllFilters()).then(() => {
       console.log('App 初始化 - 筛选条件获取完成');
     }).catch(error => {
       console.error('App 初始化 - 获取筛选条件失败:', error);
     });
+    } else {
+      console.log('App 初始化 - 筛选条件已存在或正在加载，跳过重复调用');
+    }
+    
+    // 📋 应用启动时，从播放记录同步到播放列表（确保历史播放记录也在播放列表中）
+    try {
+      const syncResult = syncFromPlayHistory();
+      if (syncResult) {
+        // 同步成功后，更新 Redux store 中的播放列表
+        const { getPlaylist } = require('./utils/playlist');
+        const playlist = getPlaylist();
+        store.dispatch(setPlaylist(playlist));
+        console.log('✅ 应用启动 - 播放记录已同步到播放列表，共', playlist.length, '个视频');
+      }
+    } catch (error) {
+      console.warn('应用启动 - 从播放记录同步到播放列表失败（不影响应用使用）:', error);
+    }
     
     // 调试信息：检查环境
     console.log('App 初始化');
@@ -238,71 +386,47 @@ function App() {
     console.log('当前路径:', window.location.href);
   }, []);
 
-  // 检查今天是否已经检测过更新
-  const shouldCheckUpdateToday = React.useCallback(() => {
-    const today = new Date().toDateString(); // 获取今天的日期字符串，例如 "Mon Jan 01 2024"
-    const lastCheckDate = localStorage.getItem('lastUpdateCheckDate');
-    
-    // 如果今天还没有检测过，返回 true
-    if (lastCheckDate !== today) {
-      // 更新最后检测日期
-      localStorage.setItem('lastUpdateCheckDate', today);
-      console.log('今天首次打开，需要检测更新');
-      return true;
-    }
-    
-    console.log('今天已经检测过更新，跳过检测');
-    return false;
-  }, []);
-
-  // 当 versionCode 和 platform 都获取到后，检查更新（每天首次打开时）
+  // 当 versionCode 和 platform 都获取到后，检查更新（应用启动后2分钟）
   React.useEffect(() => {
     if (versionCode && platform) {
-      // 检查今天是否已经检测过更新
-      if (shouldCheckUpdateToday()) {
         // 延迟检查更新，避免影响应用启动速度
         const timer = setTimeout(() => {
+        console.log('应用启动后2分钟，开始检查更新');
           handleCheckUpdate(versionCode, platform);
-        }, 5 * 60 * 1000); // 应用启动后5分钟检查更新
+      }, 2 * 60 * 1000); // 应用启动后2分钟检查更新
         
         return () => clearTimeout(timer);
-      } else {
-        console.log('今天已检测过更新，跳过本次检测');
-      }
     }
-  }, [versionCode, platform, handleCheckUpdate, shouldCheckUpdateToday]);
+  }, [versionCode, platform, handleCheckUpdate]);
 
-  // 处理下载更新
+  // 下载完成后，根据强制/非强制更新显示不同的弹窗
+  React.useEffect(() => {
+    if (downloadState === 'completed' && updateInfo) {
+      console.log('下载完成，准备显示更新提示', { isForce: isForceUpdate });
+      // 🔧 下载完成后才显示弹窗（无论强制还是非强制更新）
+      setShowUpdateDialog(true);
+    } else if (downloadState === 'error' && updateInfo) {
+      // 🔧 下载失败时，只有强制更新才显示弹窗让用户重试
+      // 非强制更新下载失败时不显示，避免影响用户体验
+      if (isForceUpdate) {
+        console.log('强制更新下载失败，显示错误提示');
+        setShowUpdateDialog(true);
+      } else {
+        console.log('非强制更新下载失败，不显示提示');
+        setShowUpdateDialog(false);
+      }
+    } else if (downloadState === 'downloading') {
+      // 🔧 下载过程中确保不显示弹窗
+      setShowUpdateDialog(false);
+    }
+  }, [downloadState, updateInfo, isForceUpdate]);
+
+  // 处理下载更新（现在由 UpdateDialog 组件内部处理）
   const handleDownload = React.useCallback(() => {
-    if (!updateInfo || !updateInfo.download_url) {
-      console.error('更新信息或下载链接不存在');
-      return;
-    }
-    
-    console.log('开始下载更新，URL:', updateInfo.download_url);
-    
-    // 在 Electron 中打开下载链接
-    if (window.electronAPI && typeof window.electronAPI.openExternal === 'function') {
-      window.electronAPI.openExternal(updateInfo.download_url)
-        .then(() => {
-          console.log('成功打开下载链接');
-          // 如果是强制更新，下载后可以提示用户安装
-          if (isForceUpdate) {
-            // 强制更新下载后，可以显示提示信息（可选）
-            console.log('强制更新：已打开下载链接，请安装新版本');
-          }
-        })
-        .catch(err => {
-          console.error('打开下载链接失败:', err);
-          // 降级方案：使用 window.open
-          window.open(updateInfo.download_url, '_blank');
-        });
-    } else {
-      // 降级方案：使用 window.open
-      console.log('使用 window.open 打开下载链接');
-      window.open(updateInfo.download_url, '_blank');
-    }
-  }, [updateInfo, isForceUpdate]);
+    // 下载逻辑已移至 UpdateDialog 组件内部
+    // 这个函数保留用于向后兼容，但实际下载由组件内部处理
+    console.log('handleDownload 被调用，但下载逻辑已移至 UpdateDialog 组件');
+  }, []);
 
   // 处理关闭更新对话框
   const handleCloseUpdateDialog = React.useCallback(() => {
@@ -340,20 +464,31 @@ function App() {
         }}
       >
         <div className="App">
-          {/* 如果是强制更新，完全隐藏应用内容，阻止使用 */}
-          {!isForceUpdate && <Routes />}
+          {/* 🔧 只有在强制更新且对话框显示时，才隐藏应用内容（下载过程中不隐藏） */}
+          {!(isForceUpdate && showUpdateDialog) && <Routes />}
           {/* 更新对话框显示逻辑：
-              1. 强制更新：isForceUpdate 为 true 且 updateInfo 存在（必须显示）
-              2. 非强制更新：showUpdateDialog 为 true 且 updateInfo 存在 */}
-          {updateInfo && (
-            (isForceUpdate) || 
-            (showUpdateDialog && !isForceUpdate)
-          ) && (
+              1. 强制更新：下载完成后显示（isForceUpdate 为 true 且 updateInfo 存在且 showUpdateDialog 为 true）
+              2. 非强制更新：下载完成后显示（showUpdateDialog 为 true 且 updateInfo 存在） */}
+          {updateInfo && showUpdateDialog && (
             <UpdateDialog
               updateInfo={updateInfo}
               isForce={isForceUpdate}
               onClose={handleCloseUpdateDialog}
               onDownload={handleDownload}
+              downloadState={downloadState}
+              downloadedFilePath={downloadedFilePath}
+              downloadProgress={downloadProgress}
+              downloadedBytes={downloadedBytes}
+              totalBytes={totalBytes}
+              downloadSpeed={downloadSpeed}
+              downloadErrorMessage={downloadErrorMessage}
+              onRetryDownload={() => {
+                if (updateInfo?.download_url) {
+                  const url = new URL(updateInfo.download_url);
+                  const fileName = url.pathname.split('/').pop() || `update-${updateInfo.version_name || Date.now()}.exe`;
+                  handleBackgroundDownload(updateInfo.download_url, fileName);
+                }
+              }}
             />
           )}
           {/* 登录提示弹窗 */}
@@ -362,8 +497,13 @@ function App() {
               message={loginDialogConfig.message}
               type={loginDialogConfig.type}
               showCancel={loginDialogConfig.showCancel}
+              showExtra={loginDialogConfig.showExtra}
+              confirmText={loginDialogConfig.confirmText}
+              cancelText={loginDialogConfig.cancelText}
+              extraText={loginDialogConfig.extraText}
               onConfirm={loginDialogConfig.onConfirm}
               onCancel={loginDialogConfig.onCancel}
+              onExtra={loginDialogConfig.onExtra}
             />
           )}
           {/* 调试：显示状态信息 */}

@@ -88,7 +88,7 @@ const FilterPanel = ({ type, onFilterChange, onApplyFilters }) => {
   }
 
   // 筛选条件的显示标签映射和顺序
-  const filterOrder = ['genres', 'regions', 'years']; // 类型、地区、年份的顺序
+  const filterOrder = ['regions', 'years', 'genres']; // 地区、年份、类型的顺序
   const filterLabels = {
     'genres': '类型',
     'regions': '地区',

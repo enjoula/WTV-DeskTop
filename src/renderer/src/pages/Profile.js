@@ -6,6 +6,7 @@ import { fetchCurrentUser, logoutUser } from '../store/authSlice';
 import { updateProfile, updateAvatar } from '../api/user';
 import { showCenterTip } from '../utils/tips';
 import PasswordDialog from '../components/PasswordDialog';
+import { processAvatarUrl } from '../config/apiConfig';
 
 const Profile = () => {
   const dispatch = useDispatch();
@@ -15,51 +16,22 @@ const Profile = () => {
   const [nickname, setNickname] = useState('');
   const [isEditingNickname, setIsEditingNickname] = useState(false);
   const [showPasswordDialog, setShowPasswordDialog] = useState(false);
-  const [avatarUrl, setAvatarUrl] = useState(null); // 用于存储当前显示的头像URL
+  const [avatarUrl, setAvatarUrl] = useState(null);
+  const [internalVersion, setInternalVersion] = useState('');
 
   useEffect(() => {
     // 获取当前用户信息
     dispatch(fetchCurrentUser());
   }, [dispatch]);
 
-  // 处理头像URL，确保是完整URL
-  const processAvatarUrl = (url) => {
-    if (!url) return null;
-    
-    // 如果已经是完整URL，直接返回
-    if (url.startsWith('http://') || url.startsWith('https://')) {
-      return url;
+  useEffect(() => {
+    // 获取内部版本号
+    if (window.electronAPI?.getInternalVersion) {
+      window.electronAPI.getInternalVersion().then(v => {
+        if (v) setInternalVersion(v);
+      }).catch(() => {});
     }
-    
-    // 如果是相对路径，需要拼接API基础URL
-    const getBaseURL = () => {
-      const isElectron = typeof window !== 'undefined' && (
-        window.electronAPI || 
-        window.location.protocol === 'file:' ||
-        navigator.userAgent.includes('Electron')
-      );
-      
-      if (isElectron) {
-        return 'http://124.222.196.128:6660';
-      }
-      
-      if (process.env.NODE_ENV === 'development') {
-        return '/api';
-      }
-      
-      return 'http://124.222.196.128:6660';
-    };
-    
-    const baseURL = getBaseURL();
-    
-    // 如果URL以/开头，直接拼接
-    if (url.startsWith('/')) {
-      return `${baseURL}${url}`;
-    }
-    
-    // 否则添加/后拼接
-    return `${baseURL}/${url}`;
-  };
+  }, []);
 
   useEffect(() => {
     if (user) {
@@ -407,6 +379,11 @@ const Profile = () => {
           <span className="logout-icon">🚪</span>
           <span>退出登录</span>
         </button>
+        {internalVersion && (
+          <div className="app-version-info">
+            <span className="app-version-value">v{internalVersion}</span>
+          </div>
+        )}
       </div>
 
       {/* 修改密码弹窗 */}

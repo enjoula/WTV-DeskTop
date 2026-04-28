@@ -13,6 +13,7 @@ import {
   getEpisodes,
   getPlayUrl
 } from '../api/video';
+import { getPlaylist, savePlaylist } from '../utils/playlist';
 
 // 异步action - 获取电影列表
 export const fetchMovies = createAsyncThunk(
@@ -246,6 +247,15 @@ const videoSlice = createSlice({
     // 播放进度跟踪
     playbackProgress: {},
     currentCategory: null, // 当前选中的分类（用于详情页保持顶部高亮）
+    // 播放列表 - 从 localStorage 初始化
+    playlist: (() => {
+      try {
+        return getPlaylist();
+      } catch (error) {
+        console.error('初始化播放列表失败:', error);
+        return [];
+      }
+    })(),
   },
   reducers: {
     clearSearchResults: (state) => {
@@ -340,6 +350,63 @@ const videoSlice = createSlice({
       state.playUrl.selectedQuality = selectedQuality || '';
       state.playUrl.loading = false;
       state.playUrl.error = null;
+    },
+    // 播放列表相关操作
+    setPlaylist: (state, action) => {
+      state.playlist = action.payload || [];
+    },
+    addToPlaylist: (state, action) => {
+      const video = action.payload;
+      // 检查是否已存在（同一视频ID和集数）
+      const existingIndex = state.playlist.findIndex(
+        item => item.videoId === video.videoId && 
+                (item.episode === video.episode || (item.episode === null && video.episode === null))
+      );
+      
+      const videoItem = {
+        videoId: video.videoId,
+        videoTitle: video.videoTitle || '未知视频',
+        videoCover: video.videoCover || '',
+        videoType: video.videoType || 'movie',
+        episode: video.episode || null,
+        timestamp: video.timestamp || Date.now()
+      };
+      
+      if (existingIndex >= 0) {
+        // 如果已存在，更新并移到最前面
+        state.playlist[existingIndex] = {
+          ...state.playlist[existingIndex],
+          ...videoItem,
+          timestamp: Date.now()
+        };
+        const updatedItem = state.playlist.splice(existingIndex, 1)[0];
+        state.playlist.unshift(updatedItem);
+      } else {
+        // 添加新视频到列表开头
+        state.playlist.unshift(videoItem);
+      }
+      
+      // 限制列表数量（最多100个）
+      if (state.playlist.length > 100) {
+        state.playlist = state.playlist.slice(0, 100);
+      }
+      
+      // 同步保存到 localStorage
+      savePlaylist(state.playlist);
+    },
+    removeFromPlaylist: (state, action) => {
+      const { videoId, episode } = action.payload;
+      state.playlist = state.playlist.filter(
+        item => !(item.videoId === videoId && 
+                  (item.episode === episode || (item.episode === null && episode === null)))
+      );
+      // 同步保存到 localStorage
+      savePlaylist(state.playlist);
+    },
+    clearPlaylist: (state) => {
+      state.playlist = [];
+      // 同步保存到 localStorage
+      savePlaylist([]);
     },
   },
   extraReducers: (builder) => {
@@ -1004,5 +1071,9 @@ export const {
   setPlayUrlFromEpisode,
   setCurrentCategory,
   clearCategoryData,
+  setPlaylist,
+  addToPlaylist,
+  removeFromPlaylist,
+  clearPlaylist,
 } = videoSlice.actions;
 export default videoSlice.reducer;

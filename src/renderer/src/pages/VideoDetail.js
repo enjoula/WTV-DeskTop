@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { useSelector, useDispatch } from 'react-redux';
-import ReactPlayer from 'react-player';
+import MyArtPlayer from '../components/MyArtPlayer';
 import Hls from 'hls.js';
 import { 
   fetchEpisodes, 
@@ -13,22 +13,46 @@ import {
   clearPlayUrl,
   clearEpisodes,
   setCurrentCategory,
-  searchVideoList
+  searchVideoList,
+  addToPlaylist
 } from '../store/videoSlice';
 import VideoImage from '../components/VideoImage';
 import StarRating from '../components/StarRating';
 import { toggleFavorite } from '../api/user';
-import { fetchFavorites } from '../store/favoriteSlice';
 import { logoutUser } from '../store/authSlice';
 import { showCenterTip } from '../utils/tips';
 import { getVideoPlayHistory, updatePlayProgress } from '../utils/playHistory';
 import { getPlayerSettings, updatePlayerSetting } from '../utils/playerSettings';
+import { PlaybackController } from '../utils/playbackController';
+import { fetchFavorites } from '../store/favoriteSlice';
+
+/** 播放/连播调试：控制台搜 WTV_PLAY_LOG；主进程终端也会打印（需 Electron + preload） */
+function wtvPlayLog(tag, payload) {
+  console.log('WTV_PLAY_LOG', tag, payload);
+  try {
+    if (typeof window !== 'undefined' && window.electronAPI?.wtvRendererLog) {
+      window.electronAPI.wtvRendererLog(tag, payload);
+    }
+  } catch (_) {
+    /* ignore */
+  }
+}
 
 const VideoDetail = () => {
   const { id } = useParams();
   const location = useLocation();
   const navigate = useNavigate();
   const dispatch = useDispatch();
+  const searchParams = new URLSearchParams(location.search);
+  const isNewWindow = searchParams.get('newWindow') === 'true';
+  const isPlayerWindow = searchParams.get('playerWindow') === 'true';
+  
+  // 🎮 初始化播放控制器（使用 useRef 确保实例稳定）
+  const playbackControllerRef = useRef(null);
+  if (!playbackControllerRef.current) {
+    playbackControllerRef.current = new PlaybackController();
+  }
+  const controller = playbackControllerRef.current;
   const { episodes, playUrl, playbackProgress, movies, tvShows, anime, varietyShows, documentaries, searchResults, filterResults, currentCategory } = useSelector(state => state.video);
   const { favorites } = useSelector(state => state.favorite || {});
   // 根据API文档，episodes包含 data (剧集列表) 和 recommendations (推荐列表)
@@ -45,6 +69,9 @@ const VideoDetail = () => {
   const [volume, setVolume] = useState(playerSettings.volume);
   const [muted, setMuted] = useState(playerSettings.muted);
   const [isPlaying, setIsPlaying] = useState(playerSettings.autoplay); // 使用用户设置的自动播放偏好
+  const [autoNextEpisode, setAutoNextEpisode] = useState(
+    playerSettings.autoNextEpisode !== false
+  );
   const [searchTerm, setSearchTerm] = useState(''); // 剧集搜索词
   const [episodeOrder, setEpisodeOrder] = useState('asc'); // 正序/倒序：'asc' 正序, 'desc' 倒序
   const [activeEpisodeGroup, setActiveEpisodeGroup] = useState(0); // 当前显示的分段索引
@@ -56,20 +83,67 @@ const VideoDetail = () => {
   const [isDescriptionOverflow, setIsDescriptionOverflow] = useState(false); // 简介是否超过3行
   const [videoLoadError, setVideoLoadError] = useState(null); // 视频加载错误
   const [videoLoadTimeout, setVideoLoadTimeout] = useState(false); // 视频加载超时
+  const [videoFitMode, setVideoFitMode] = useState(() => {
+    // 从 localStorage 读取用户选择的显示模式，默认为 contain（16:9）
+    const saved = localStorage.getItem('wtv_video_fit_mode');
+    return saved || 'contain'; // contain: 16:9, cover: 裁剪, fill: 填充, none: 原比例
+  }); // 视频显示模式：contain(16:9), cover(裁剪), fill(填充), none(原比例)
+  const [isPictureInPicture, setIsPictureInPicture] = useState(false); // 画中画状态
+  const [isFullscreen, setIsFullscreen] = useState(false); // 全屏状态
   const isSeekingRef = useRef(false); // 是否正在拖动播放进度
+  const seekProtectionEndTimeRef = useRef(0); // 🔧 拖动保护期结束时间（毫秒），在此时间之前忽略所有播放/暂停事件
   const playerRef = useRef(null);
-  const reactPlayerRef = useRef(null); // ReactPlayer 的 ref
+  const playerRefInternal = useRef(null); // ReactPlayer 的 ref
   const descriptionRef = useRef(null); // 简介文本的 ref
   const isPlayingRef = useRef(false); // 使用 ref 来跟踪实际的播放状态，避免状态冲突
   const hasSkippedRef = useRef(false); // 跟踪是否已经执行过快进，避免重复快进
   const hasAutoPlayFromHistoryRef = useRef(false); // 跟踪是否已经从播放记录自动播放
+  const autoNextInFlightRef = useRef(false); // 防止自动连播重复触发
+  const handleEndedDedupeRef = useRef(0); // 防止 ended 双通道重复进入 handleEnded
+  const userPausedRef = useRef(false); // 标记用户是否手动暂停，避免缓冲完成后自动恢复播放
   const lastSavedProgressRef = useRef(0); // 上次保存的进度（秒）
   const lastSavedTimeRef = useRef(0); // 上次保存的时间戳（毫秒）
+  
+  // 辅助函数：安全地获取 video 元素
+  const getVideoElement = useCallback(() => {
+    try {
+      // 方法1: 通过 ReactPlayer 的 getInternalPlayer 获取
+      const internalPlayer = playerRefInternal.current?.getInternalPlayer?.();
+      if (internalPlayer) {
+        // getInternalPlayer 可能返回 video 元素本身，或者包含 video 元素的容器
+        if (internalPlayer.tagName === 'VIDEO') {
+          return internalPlayer;
+        }
+        const video = internalPlayer.querySelector?.('video');
+        if (video) return video;
+      }
+    } catch (e) {
+      console.warn('通过 getInternalPlayer 获取 video 元素失败:', e);
+    }
+    
+    // 方法2: 从 playerRef 的 wrapper 中查找
+    try {
+      const video = playerRef.current?.wrapper?.querySelector?.('video');
+      if (video) return video;
+    } catch (e) {
+      console.warn('从 playerRef wrapper 获取 video 元素失败:', e);
+    }
+    
+    return null;
+  }, []);
   const justSwitchedEpisodeRef = useRef(false); // 是否刚刚切换了集数（用于避免拖动后循环暂停播放）
   const videoLoadTimeoutRef = useRef(null); // 视频加载超时定时器
   const errorRetryRef = useRef(0); // 错误重试次数
   const formatErrorRetryTimerRef = useRef(null); // 格式错误重试定时器
   const resumeTimeRef = useRef(null); // 续播时间（秒），在播放器准备好后设置
+  const seekTimeoutRef = useRef(null); // 拖动进度条的延迟定时器
+  const pendingAutoPlayEpisodeRef = useRef(null); // 播放窗口待自动播放的集数
+  const hasAutoPlayFromPlayerWindowRef = useRef(false); // 播放窗口是否已自动触发播放
+  const handlePlayRef = useRef(null);
+  const handleMoviePlayRef = useRef(null);
+  const relatedVideosGridRef = useRef(null);
+  const [canScrollRelatedLeft, setCanScrollRelatedLeft] = useState(false);
+  const [canScrollRelatedRight, setCanScrollRelatedRight] = useState(false);
 
   // 规范化视频信息，确保 cover_url 和 pic 字段一致
   // 规范化视频数据，确保封面图字段一致
@@ -103,6 +177,17 @@ const VideoDetail = () => {
     };
   };
 
+  useEffect(() => {
+    if (!isPlayerWindow) {
+      pendingAutoPlayEpisodeRef.current = null;
+      hasAutoPlayFromPlayerWindowRef.current = false;
+      return;
+    }
+    hasAutoPlayFromPlayerWindowRef.current = false;
+    const params = new URLSearchParams(location.search);
+    pendingAutoPlayEpisodeRef.current = params.get('autoplayEpisode');
+  }, [id, isPlayerWindow, location.search]);
+
   // 统一类型映射
   const mapVideoType = (type) => {
     if (!type) return null;
@@ -125,30 +210,6 @@ const VideoDetail = () => {
     return typeMap[lower] || lower;
   };
 
-  // 安全调用 play()，忽略因 DOM 移除导致的 AbortError
-  const safePlay = (videoElement) => {
-    if (!videoElement) return;
-    try {
-      const playPromise = videoElement.play?.();
-      if (playPromise && typeof playPromise.catch === 'function') {
-        playPromise.catch(err => {
-          if (err?.name === 'AbortError') {
-            console.warn('play() 被中断（元素已被移除或切换）');
-          } else {
-            console.error('play() 失败:', err);
-          }
-        });
-      }
-    } catch (err) {
-      if (err?.name === 'AbortError') {
-        console.warn('play() 被中断（同步异常）');
-      } else {
-        console.error('play() 调用异常:', err);
-      }
-    }
-  };
-
-
   useEffect(() => {
     // 检查是否从播放记录跳转过来
     let playHistory = location.state?.playHistory;
@@ -160,8 +221,8 @@ const VideoDetail = () => {
       console.log('从 videoData 中获取播放记录:', playHistory);
     }
     
-    // 如果还是没有，尝试从 localStorage 中读取
-    if (!playHistory && id) {
+    // 如果还是没有，尝试从 localStorage 中读取（仅用于从播放记录页面进入的情况）
+    if (!playHistory && id && location.state?.fromPlayHistory) {
       try {
         const storedHistory = getVideoPlayHistory(id);
         if (storedHistory) {
@@ -174,7 +235,7 @@ const VideoDetail = () => {
             progress: storedHistory.progress,
             duration: storedHistory.duration
           };
-          console.log('从 localStorage 读取播放记录:', playHistory);
+          console.log('从 localStorage 读取播放记录（从播放记录页面进入）:', playHistory);
         }
       } catch (error) {
         console.error('从 localStorage 读取播放记录失败:', error);
@@ -291,6 +352,9 @@ const VideoDetail = () => {
           if (data) {
             console.log('从 Electron API 读取视频数据:', data);
             electronData = data;
+            if (isPlayerWindow && data.autoPlayEpisode) {
+              pendingAutoPlayEpisodeRef.current = data.autoPlayEpisode;
+            }
             
             // 如果 Electron API 数据中包含 playHistory，更新 playHistory 变量
             if (data.playHistory && !playHistory) {
@@ -381,27 +445,33 @@ const VideoDetail = () => {
     
     // 执行异步加载
     loadVideoDataFromElectron();
-  }, [id, location.state, movies.data, tvShows.data, anime.data, varietyShows.data, documentaries.data, searchResults.data, filterResults.data, favorites.data, currentCategory, dispatch]);
+  }, [id, isPlayerWindow, location.state, movies.data, tvShows.data, anime.data, varietyShows.data, documentaries.data, searchResults.data, filterResults.data, favorites.data, currentCategory, dispatch]);
 
-  // 在新窗口中打开时，当视频信息加载完成后更新窗口标题
+  // 动态更新浏览器页面标题（document.title）
   useEffect(() => {
-    if (videoInfo && videoInfo.title) {
-      const searchParams = new URLSearchParams(location.search);
-      const isNewWindow = searchParams.get('newWindow') === 'true';
-      if (isNewWindow && window.electronAPI && window.electronAPI.updateVideoWindowTitle) {
-        window.electronAPI.updateVideoWindowTitle(videoInfo.title);
-      }
+    if (!videoInfo) {
+      return;
     }
-  }, [videoInfo, location.search]);
 
-  // 根据收藏列表设置当前视频的收藏状态
-  useEffect(() => {
-    // 如果已登录且收藏列表为空且未在加载中，则主动获取一次收藏列表，确保状态同步
-    if (isAuthenticated && (!favorites?.data || favorites.data.length === 0) && !favorites?.loading) {
-      console.log('详情页初始化获取收藏列表');
-      dispatch(fetchFavorites({ page: 1, size: 100 }));
+    // 判断是否为电影类型
+    const videoType = mapVideoType(videoInfo?.type || currentCategory || 'tv');
+    const isMovie = videoType === 'movies' || videoType === 'movie';
+    
+    const videoTitle = videoInfo.title || videoInfo.name || '视频详情';
+    
+    // 如果是非电影类型且有选中的集数，显示"视频名称 第X集"
+    if (!isMovie && selectedEpisode) {
+      document.title = `${videoTitle} 第${selectedEpisode}集`;
+    } else {
+      // 电影类型或没有选中集数，只显示视频名称
+      document.title = videoTitle;
     }
-  }, [isAuthenticated, favorites?.data, favorites?.loading, dispatch]);
+
+    // 组件卸载时恢复默认标题
+    return () => {
+      document.title = 'WTV';
+    };
+  }, [videoInfo, selectedEpisode, currentCategory]);
 
   // 监听登录状态变化，登录成功后刷新数据
   useEffect(() => {
@@ -409,24 +479,50 @@ const VideoDetail = () => {
       console.log('用户已登录，刷新视频详情页数据');
       // 重新获取剧集和推荐信息
       dispatch(fetchEpisodes(id));
-      // 重新获取收藏列表
-      dispatch(fetchFavorites({ page: 1, size: 100 }));
+      // 不再自动获取收藏列表，只在用户进入收藏列表页面时获取
     }
   }, [isAuthenticated, id, dispatch]);
 
-  // 根据收藏列表实时更新当前视频的红心状态
+  // 🔧 根据收藏列表实时更新当前视频的红心状态
   useEffect(() => {
     if (!isAuthenticated) {
       setIsFavorite(false);
       return;
     }
+    
     const list = favorites?.data || [];
+    const favoritesLoaded = favorites?.pagination !== undefined && Object.keys(favorites.pagination).length > 0;
+    
+    // 🔧 如果收藏列表还没有加载，先获取收藏列表（只获取第一页，用于判断收藏状态）
+    if (!favoritesLoaded && !favorites?.loading) {
+      console.log('收藏列表未加载，主动获取收藏列表以判断收藏状态');
+      dispatch(fetchFavorites({ page: 1, size: 20 })).then((result) => {
+        // 获取成功后，再次检查收藏状态
+        if (result.meta.requestStatus === 'fulfilled') {
+          const updatedList = result.payload?.data?.list || [];
+          const inFav = updatedList.some((v) => String(v.id) === String(id));
+          setIsFavorite(inFav);
+          console.log('收藏列表加载完成，当前视频收藏状态:', inFav);
+        }
+      }).catch((error) => {
+        console.error('获取收藏列表失败:', error);
+        // 获取失败时，设置为未收藏
+        setIsFavorite(false);
+      });
+      return;
+    }
+    
+    // 🔧 如果收藏列表已加载，直接检查收藏状态
     const inFav = list.some((v) => String(v.id) === String(id));
     setIsFavorite(inFav);
-  }, [isAuthenticated, favorites?.data, id]);
+    console.log('根据收藏列表更新收藏状态:', { videoId: id, isFavorite: inFav, favoritesCount: list.length });
+  }, [isAuthenticated, favorites?.data, favorites?.pagination, favorites?.loading, id, dispatch]);
 
   // 当视频ID变化时，重置播放状态（但保留用户设置）
   useEffect(() => {
+    // 🎮 重置控制器状态
+    controller.reset();
+    
     setIsMoviePlaying(false);
     setPlayerReady(false);
     setSelectedEpisode(null);
@@ -435,32 +531,138 @@ const VideoDetail = () => {
     hasSkippedRef.current = false; // 重置快进状态
   }, [id]);
 
-  // 在播放器准备好时应用用户设置
+  // 监听视频显示模式变化，应用到视频元素
   useEffect(() => {
-    if (playerReady && reactPlayerRef.current) {
+    if (!playerReady) return;
+    
+    const applyVideoFitMode = () => {
       try {
-        const videoElement = reactPlayerRef.current.getInternalPlayer?.('video') || 
-                           (reactPlayerRef.current.wrapper?.querySelector?.('video'));
-        if (videoElement) {
-          // 应用音量设置
-          if (videoElement.volume !== volume) {
-            videoElement.volume = volume;
+        const videoElement = (() => {
+                try {
+                  return getVideoElement();
+                } catch (e) {
+                  return null;
+                }
+              })() || 
+                           (playerRef.current?.wrapper?.querySelector?.('video'));
+        if (videoElement && document.contains(videoElement)) {
+          if (videoElement.style) {
+            videoElement.style.objectFit = videoFitMode;
           }
-          // 应用静音设置
-          if (videoElement.muted !== muted) {
-            videoElement.muted = muted;
-          }
-          // 应用播放速度设置
-          if (videoElement.playbackRate !== playbackRate) {
-            videoElement.playbackRate = playbackRate;
-          }
-          console.log('应用用户播放器设置:', { volume, muted, playbackRate });
+        }
+      } catch (err) {
+        console.error('应用视频显示模式失败:', err);
+      }
+    };
+    
+    // 立即应用
+    applyVideoFitMode();
+    
+    // 延迟应用，确保视频元素已渲染
+    const timer = setTimeout(applyVideoFitMode, 100);
+    return () => clearTimeout(timer);
+  }, [videoFitMode, playerReady]);
+
+  // 监听画中画状态变化
+  useEffect(() => {
+    const handleEnterPictureInPicture = () => {
+      setIsPictureInPicture(true);
+    };
+    
+    const handleLeavePictureInPicture = () => {
+      setIsPictureInPicture(false);
+    };
+    
+    document.addEventListener('enterpictureinpicture', handleEnterPictureInPicture);
+    document.addEventListener('leavepictureinpicture', handleLeavePictureInPicture);
+    
+    // 检查当前是否已在画中画模式
+    setIsPictureInPicture(!!document.pictureInPictureElement);
+    
+    return () => {
+      document.removeEventListener('enterpictureinpicture', handleEnterPictureInPicture);
+      document.removeEventListener('leavepictureinpicture', handleLeavePictureInPicture);
+    };
+  }, []);
+
+  // 使用 ref 标记是否已经应用过初始设置，避免重复应用
+  const hasAppliedInitialSettingsRef = useRef(false);
+  // 使用 ref 标记是否由用户手动调整，避免被重置
+  const isUserAdjustingRef = useRef(false);
+  // 使用 ref 存储当前播放器设置值，用于事件监听中比较，避免读取过时的 state
+  const currentVolumeRef = useRef(volume);
+  const currentMutedRef = useRef(muted);
+  const currentPlaybackRateRef = useRef(playbackRate);
+  // 使用 ref 标记是否正在同步设置到视频元素，避免循环触发
+  const isSyncingSettingsRef = useRef(false);
+  
+  // 同步 ref 值到 state（当 state 从外部更新时）
+  useEffect(() => {
+    currentVolumeRef.current = volume;
+    currentMutedRef.current = muted;
+    currentPlaybackRateRef.current = playbackRate;
+  }, [volume, muted, playbackRate]);
+
+  // 注意：这个 useEffect 已被禁用，因为会导致用户调整后被重置的问题
+  // 现在完全依赖事件监听器（volumechange/ratechange）来更新 state
+  // 只在视频加载时（onReady）同步一次初始设置，之后不再从 state 同步回视频元素
+  // 这样可以避免用户通过原生控制栏调整后立即被重置的问题
+  // 
+  // 如果需要从外部更新（比如从设置页面），应该直接操作视频元素，而不是更新 state
+  // useEffect(() => {
+  //   // 已禁用自动同步
+  // }, [volume, muted, playbackRate, playerReady]);
+  
+  // 在播放器准备好时应用用户设置（仅在首次准备好时应用，避免覆盖用户调整）
+  // 注意：这个 useEffect 已经被 onReady 回调中的逻辑替代，保留它作为备用
+  // 但实际上，onReady 回调中的逻辑更可靠，因为它能确保视频元素已经准备好
+  // 所以这个 useEffect 可以移除或保留作为备用
+  useEffect(() => {
+    if (playerReady && playerRefInternal.current && !hasAppliedInitialSettingsRef.current) {
+      try {
+        const videoElement = (() => {
+                try {
+                  return getVideoElement();
+                } catch (e) {
+                  return null;
+                }
+              })() || 
+                           (playerRefInternal.current.wrapper?.querySelector?.('video'));
+        if (videoElement && document.contains(videoElement)) {
+          // 设置同步标志，避免事件监听器触发
+          isSyncingSettingsRef.current = true;
+          
+          // 使用当前的 state 值，这些值已经包含了用户的调整
+          videoElement.volume = volume;
+          videoElement.muted = muted;
+          videoElement.playbackRate = playbackRate;
+          
+          // 同步更新 ref
+          currentVolumeRef.current = volume;
+          currentMutedRef.current = muted;
+          currentPlaybackRateRef.current = playbackRate;
+          
+          hasAppliedInitialSettingsRef.current = true;
+          console.log('应用用户播放器设置（useEffect）:', { volume, muted, playbackRate });
+          
+          // 清除同步标志
+          setTimeout(() => {
+            isSyncingSettingsRef.current = false;
+          }, 200);
         }
       } catch (error) {
         console.error('应用播放器设置失败:', error);
+        isSyncingSettingsRef.current = false;
       }
     }
-  }, [playerReady, volume, muted, playbackRate]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playerReady]); // 只依赖 playerReady，移除 volume/muted/playbackRate 依赖，避免覆盖用户调整
+
+  // 当视频ID或播放URL变化时，重置标记（新视频需要重新应用初始设置）
+  useEffect(() => {
+    hasAppliedInitialSettingsRef.current = false;
+    isUserAdjustingRef.current = false;
+  }, [id, playUrl.url]);
 
   // 恢复用户保存的画质设置
   useEffect(() => {
@@ -500,6 +702,17 @@ const VideoDetail = () => {
   useEffect(() => {
     return () => {
       try {
+        // 🔧 清除拖动定时器
+        if (seekTimeoutRef.current) {
+          clearTimeout(seekTimeoutRef.current);
+          seekTimeoutRef.current = null;
+        }
+        
+        // 🎮 销毁控制器
+        if (controller) {
+          controller.destroy();
+        }
+        
         // 停止播放
         setIsPlaying(false);
         isPlayingRef.current = false;
@@ -582,7 +795,7 @@ const VideoDetail = () => {
         const selectedGroupIndex = episodeGroups.findIndex(group => 
           group.some(ep => {
             const episodeNumber = ep.episode_number || ep.id;
-            return episodeNumber === selectedEpisode;
+            return String(episodeNumber) === String(selectedEpisode);
           })
         );
         
@@ -594,11 +807,10 @@ const VideoDetail = () => {
     }
   }, [selectedEpisode, episodes.data, activeSeason]);
 
-  // 当播放地址准备好且正在播放时，等待播放器初始化
-  // 注意：这里不立即设置 isPlaying，等待 onReady 回调中视频元素真正准备好后再设置
+  // MyArtPlayer 已内置 HLS 处理，以下手动注入逻辑已禁用
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
-    if ((isMoviePlaying || isEpisodePlaying) && playUrl.url && !playUrl.loading && !playUrl.error) {
+    if (false && (isMoviePlaying || isEpisodePlaying) && playUrl.url && !playUrl.loading && !playUrl.error) {
       console.log('播放地址已准备好，等待播放器初始化...');
       // 不立即设置 isPlaying，等待 onReady 回调中视频元素真正准备好后再设置
       // 这样可以避免在视频元素还没准备好时就尝试播放，导致格式错误
@@ -624,6 +836,20 @@ const VideoDetail = () => {
           const videoElement = playerRef.current.wrapper.querySelector('video');
           console.log('video 元素:', videoElement);
           if (videoElement) {
+            // 使用 ArtPlayer 自带控件：关闭原生 controls，避免重复控制条
+            videoElement.removeAttribute('controls');
+            videoElement.controls = false;
+
+            // 应用视频显示模式
+            if (videoElement.style) {
+              videoElement.style.objectFit = videoFitMode;
+            }
+            
+            // 检查视频元素的可见性和尺寸
+            const rect = videoElement.getBoundingClientRect();
+            const computedStyle = window.getComputedStyle(videoElement);
+            const parentRect = videoElement.parentElement?.getBoundingClientRect();
+            const containerRect = playerRef.current?.wrapper?.getBoundingClientRect();
             console.log('video 元素状态:', {
               paused: videoElement.paused,
               readyState: videoElement.readyState,
@@ -632,8 +858,36 @@ const VideoDetail = () => {
               currentSrc: videoElement.currentSrc,
               currentTime: videoElement.currentTime,
               duration: videoElement.duration,
-              error: videoElement.error
+              error: videoElement.error,
+              // 添加可见性检查
+              width: rect.width,
+              height: rect.height,
+              display: computedStyle.display,
+              visibility: computedStyle.visibility,
+              opacity: computedStyle.opacity,
+              zIndex: computedStyle.zIndex,
+              position: computedStyle.position,
+              // 添加父容器和容器信息
+              parentWidth: parentRect?.width,
+              parentHeight: parentRect?.height,
+              containerWidth: containerRect?.width,
+              containerHeight: containerRect?.height
             });
+            
+            // 如果视频元素尺寸为 0，输出警告
+            if (rect.width === 0 || rect.height === 0) {
+              console.error('❌ 视频元素尺寸为 0！', {
+                videoWidth: rect.width,
+                videoHeight: rect.height,
+                parentWidth: parentRect?.width,
+                parentHeight: parentRect?.height,
+                containerWidth: containerRect?.width,
+                containerHeight: containerRect?.height,
+                display: computedStyle.display,
+                visibility: computedStyle.visibility,
+                opacity: computedStyle.opacity
+              });
+            }
             
             // 检查是否有错误
             if (videoElement.error) {
@@ -658,13 +912,29 @@ const VideoDetail = () => {
             if (isM3u8 && !hlsInstance && Hls.isSupported()) {
               console.log('检测到 HLS 视频但缺少 HLS 实例，尝试手动创建...');
               try {
+                // 启用原生控件
+                if (videoElement) {
+                  if (!videoElement.hasAttribute('controls')) {
+                    videoElement.setAttribute('controls', '');
+                  }
+                  videoElement.controls = true;
+                }
+                
                 const hls = new Hls({
                   enableWorker: true,
-                  lowLatencyMode: true,
+                  lowLatencyMode: false, // 禁用低延迟模式，避免缓冲不足导致音频卡顿
                   backBufferLength: 90,
-                  maxBufferLength: 30,
-                  maxMaxBufferLength: 60,
+                  maxBufferLength: 600, // 增加最大缓冲长度到600秒，确保音频流畅
+                  maxMaxBufferLength: 600, // 增加最大缓冲长度上限到600秒
                   startLevel: -1, // 自动选择最佳质量
+                  maxBufferSize: 600 * 1000 * 1000, // 最大缓冲大小 600MB（对应600秒视频）
+                  maxBufferHole: 0.5, // 允许的最大缓冲间隙（秒）
+                  highBufferWatchdogPeriod: 2, // 高缓冲监控周期（秒）
+                  nudgeOffset: 0.1, // 缓冲调整偏移量（秒）
+                  nudgeMaxRetry: 3, // 最大重试次数
+                  maxFragLoadingTimeOut: 20000, // 片段加载超时时间（毫秒）
+                  fragLoadingTimeOut: 20000, // 片段加载超时时间（毫秒）
+                  manifestLoadingTimeOut: 10000, // 清单加载超时时间（毫秒）
                   debug: false
                 });
                 
@@ -673,7 +943,7 @@ const VideoDetail = () => {
                 
                 hls.on(Hls.Events.MANIFEST_PARSED, () => {
                   console.log('HLS manifest 解析完成，可以播放');
-                  if (videoElement.paused && !isSeekingRef.current && document.contains(videoElement)) {
+                  if (videoElement.paused && !isSeekingRef.current && document.contains(videoElement) && !userPausedRef.current && (isPlaying || isPlayingRef.current)) {
                     videoElement.play().catch(err => {
                       if (err.name === 'AbortError' && err.message?.includes('removed from the document')) {
                         console.warn('播放请求被中断（媒体元素可能被移除）:', err.message);
@@ -685,8 +955,9 @@ const VideoDetail = () => {
                 });
                 
                 hls.on(Hls.Events.ERROR, (event, data) => {
-                  console.error('HLS 错误:', data);
+                  // 只处理致命错误，忽略非致命错误（如 bufferSeekOverHole、bufferStalledError）
                   if (data.fatal) {
+                    console.error('HLS 致命错误:', data);
                     switch (data.type) {
                       case Hls.ErrorTypes.NETWORK_ERROR:
                         console.error('HLS 网络错误，尝试恢复...');
@@ -718,7 +989,7 @@ const VideoDetail = () => {
               
               const onLoadedMetadata = () => {
                 console.log('video 元数据已加载，readyState:', videoElement.readyState);
-                if (videoElement.paused && !isSeekingRef.current && document.contains(videoElement)) {
+                if (videoElement.paused && !isSeekingRef.current && document.contains(videoElement) && !userPausedRef.current && (isPlaying || isPlayingRef.current)) {
                   videoElement.play().then(() => {
                     console.log('元数据加载后播放成功');
                     setIsPlaying(true);
@@ -739,7 +1010,7 @@ const VideoDetail = () => {
               };
               const onCanPlay = () => {
                 console.log('video 可以播放，readyState:', videoElement.readyState);
-                if (videoElement.paused && !isSeekingRef.current && document.contains(videoElement)) {
+                if (videoElement.paused && !isSeekingRef.current && document.contains(videoElement) && !userPausedRef.current && (isPlaying || isPlayingRef.current)) {
                   videoElement.play().then(() => {
                     console.log('canplay 事件后播放成功');
                     setIsPlaying(true);
@@ -761,7 +1032,7 @@ const VideoDetail = () => {
               videoElement.addEventListener('loadedmetadata', onLoadedMetadata);
               videoElement.addEventListener('canplay', onCanPlay);
               return;
-            } else if (videoElement.paused && !isSeekingRef.current && document.contains(videoElement)) {
+            } else if (videoElement.paused && !isSeekingRef.current && document.contains(videoElement) && !userPausedRef.current && (isPlaying || isPlayingRef.current)) {
               // 只有在不是拖动状态时才自动播放，且元素仍在 DOM 中
               console.log('延迟找到 video 元素，尝试播放');
               videoElement.play().then(() => {
@@ -781,7 +1052,7 @@ const VideoDetail = () => {
                 console.error('延迟播放失败:', err);
                 console.error('错误详情:', err.message, err.name);
                 // 如果播放失败且元素仍在 DOM 中，尝试静音播放
-                if (!videoElement.muted && document.contains(videoElement)) {
+                if (!videoElement.muted && document.contains(videoElement) && !userPausedRef.current && (isPlaying || isPlayingRef.current)) {
                   console.log('尝试静音播放');
                   videoElement.muted = true;
                   videoElement.play().then(() => {
@@ -799,7 +1070,15 @@ const VideoDetail = () => {
               });
             } else {
               console.log('video 元素已经在播放中，currentTime:', videoElement.currentTime);
+              // 只有在用户没有暂停时才设置播放状态
+              if (!userPausedRef.current) {
               setIsPlaying(true);
+                isPlayingRef.current = true;
+              } else {
+                console.log('用户已暂停，不设置播放状态');
+                // 如果用户已暂停，强制暂停视频
+                videoElement.pause().catch(() => {});
+              }
               // 如果正在播放但是静音，尝试取消静音
               // 应用用户设置的静音状态
               if (videoElement.muted !== muted && videoElement.readyState >= 2) {
@@ -808,21 +1087,21 @@ const VideoDetail = () => {
             }
           } else {
             console.warn('延迟检查：未找到 video 元素');
-            // 尝试从 reactPlayerRef 查找
-            if (reactPlayerRef.current) {
-              console.log('尝试从 reactPlayerRef 查找 video 元素');
-              const playerContainer = reactPlayerRef.current.wrapper || reactPlayerRef.current;
+            // 尝试从 playerRefInternal 查找
+            if (playerRefInternal.current) {
+              console.log('尝试从 playerRefInternal 查找 video 元素');
+              const playerContainer = playerRefInternal.current.wrapper || playerRefInternal.current;
               if (playerContainer) {
                 const videoFromRef = playerContainer.querySelector?.('video') || 
                                     (playerContainer.querySelectorAll && playerContainer.querySelectorAll('video')[0]);
-                if (videoFromRef && !isSeekingRef.current) {
-                  console.log('从 reactPlayerRef 找到 video 元素，尝试播放');
+                if (videoFromRef && !isSeekingRef.current && !userPausedRef.current && (isPlaying || isPlayingRef.current)) {
+                  console.log('从 playerRefInternal 找到 video 元素，尝试播放');
                   if (videoFromRef.paused) {
                     videoFromRef.play().then(() => {
-                      console.log('从 reactPlayerRef 播放成功');
+                      console.log('从 playerRefInternal 播放成功');
                       setIsPlaying(true);
                     }).catch((err) => {
-                      console.error('从 reactPlayerRef 播放失败:', err);
+                      console.error('从 playerRefInternal 播放失败:', err);
                     });
                   }
                 }
@@ -899,23 +1178,7 @@ const VideoDetail = () => {
   useEffect(() => {
     // 进入详情页或切换视频时，强制滚动到顶部
     window.scrollTo(0, 0);
-    
-    // 如果未登录，提示用户登录（由 client.js 的 401 拦截器触发，或者此处手动检查）
-    if (!isAuthenticated) {
-      console.log('用户未登录，尝试显示登录提示');
-      if (window.showLoginDialog) {
-        window.showLoginDialog({
-          message: '您还未登录，请先登录以享受完整服务。',
-          type: 'info',
-          showCancel: true
-        }).then(shouldRedirect => {
-          if (shouldRedirect) {
-            navigate('/login');
-          }
-        });
-      }
-    }
-  }, [id, isAuthenticated, navigate]);
+  }, [id]);
 
   useEffect(() => {
     // 获取剧集和推荐信息
@@ -949,7 +1212,13 @@ const VideoDetail = () => {
       
       // 清理视频元素的事件监听器
       try {
-        const videoElement = reactPlayerRef.current?.getInternalPlayer?.('video') || 
+        const videoElement = (() => {
+                try {
+                  return getVideoElement();
+                } catch (e) {
+                  return null;
+                }
+              })() || 
                            (playerRef.current?.wrapper?.querySelector?.('video'));
         if (videoElement && videoElement._eventListeners) {
           videoElement._eventListeners.forEach(({ type, handler }) => {
@@ -966,12 +1235,120 @@ const VideoDetail = () => {
   // 注意：executeAutoPlayFromHistory 函数已移到 handleMoviePlay 之后，以避免变量初始化顺序问题
   // 使用 executeAutoPlayFromHistory 的 useEffect 也移到该函数定义之后
 
-  const handlePlay = (episodeNumber) => {
-    console.log('handlePlay called with episodeNumber:', episodeNumber);
+  // 更新视频窗口标题（仅在新窗口中）
+  const updateVideoWindowTitle = useCallback((episodeNumber = null) => {
+    if (!isNewWindow || !window.electronAPI) {
+      return;
+    }
+    
+    // 判断是否为电影类型
+    const videoType = mapVideoType(videoInfo?.type || currentCategory || 'tv');
+    const isMovie = videoType === 'movies' || videoType === 'movie';
+    
+    // 如果不是电影类型，显示视频名称和集数信息
+    if (!isMovie && videoInfo) {
+      const videoTitle = videoInfo.title || videoInfo.name || '未知视频';
+      const episodeInfo = episodeNumber ? `第${episodeNumber}集` : '';
+      const title = episodeInfo ? `${videoTitle} - ${episodeInfo}` : videoTitle;
+      
+      // 更新窗口标题
+      window.electronAPI.updateVideoWindowTitle(title).catch(err => {
+        console.warn('更新视频窗口标题失败:', err);
+      });
+    }
+  }, [currentCategory, isNewWindow, videoInfo]);
+
+  // 在新窗口中打开时，当视频信息加载完成后更新窗口标题
+  useEffect(() => {
+    if (videoInfo && videoInfo.title && isNewWindow) {
+      updateVideoWindowTitle(selectedEpisode);
+    }
+  }, [videoInfo, isNewWindow, selectedEpisode, updateVideoWindowTitle]);
+
+  const buildLoginRedirectState = useCallback((reason = 'auth') => ({
+    from: {
+      pathname: location.pathname,
+      search: location.search,
+      hash: location.hash,
+    },
+    reason,
+  }), [location.pathname, location.search, location.hash]);
+
+  const promptLoginBeforePlayback = useCallback(async () => {
+    if (isAuthenticated) {
+      return true;
+    }
+
+    navigate('/login', { state: buildLoginRedirectState('playback') });
+    return false;
+  }, [buildLoginRedirectState, isAuthenticated, navigate]);
+
+  const handlePlay = async (episodeNumber, options = {}) => {
+    const { skipLoginCheck = false, fromAutoNext = false } = options;
+    wtvPlayLog('play.request', {
+      videoId: id,
+      episodeNumber,
+      fromAutoNext,
+      skipLoginCheck,
+      currentSelectedEpisode: selectedEpisode
+    });
+    if (!skipLoginCheck) {
+      const canPlay = await promptLoginBeforePlayback();
+      if (!canPlay) {
+        return;
+      }
+    }
+
+    if (!isPlayerWindow && window.electronAPI?.openPlayerWindow) {
+      const playbackVideoId = videoInfo?.videoid || videoInfo?.vod_id || id;
+      const normalizedVideo = normalizeVideoInfo({
+        ...(videoInfo || {}),
+        id: playbackVideoId,
+      });
+      window.electronAPI.openPlayerWindow(playbackVideoId, normalizedVideo, episodeNumber)
+        .then(() => {
+          showCenterTip('已切换到播放窗口');
+        })
+        .catch((err) => {
+          console.error('打开播放窗口失败:', err);
+          showCenterTip('打开播放窗口失败');
+        });
+      return;
+    }
+
+    // 🔧 清除拖动定时器（切换视频时清除之前的拖动状态）
+    if (seekTimeoutRef.current) {
+      clearTimeout(seekTimeoutRef.current);
+      seekTimeoutRef.current = null;
+    }
+    
+    // 🎯 检测播放记录：如果有播放记录且不是从播放记录页面进入，直接续播
+    if (!location.state?.fromPlayHistory && !fromAutoNext) {
+      const storedHistory = getVideoPlayHistory(id);
+      if (storedHistory && storedHistory.progress > 5 && storedHistory.episode === episodeNumber) {
+        console.log('检测到播放记录，自动续播到上次进度');
+        showCenterTip('已继续上次进度播放');
+        handlePlayFromTime(episodeNumber, storedHistory.progress);
+        return;
+      }
+    }
+    
+    // 🎮 使用控制器处理用户播放操作
+    controller.userPlay();
+    setIsPlaying(true);
+    isPlayingRef.current = true;
+    
     // 优先使用 videoInfo 中的真实 ID，如果没有则使用 URL 中的 id
     const videoId = videoInfo?.videoid || videoInfo?.vod_id || id;
     console.log('Using videoId for play:', videoId);
     setSelectedEpisode(episodeNumber);
+    wtvPlayLog('play.selectedEpisode', {
+      videoId,
+      selectedEpisode: episodeNumber
+    });
+    
+    // 更新窗口标题（如果在新窗口中播放）
+    updateVideoWindowTitle(episodeNumber);
     
     // 切换集数前，清空旧的播放地址
     dispatch(clearPlayUrl());
@@ -1055,7 +1432,7 @@ const VideoDetail = () => {
   // 切换收藏状态
   const handleToggleFavorite = async () => {
     if (!isAuthenticated) {
-      navigate('/login');
+      navigate('/login', { state: buildLoginRedirectState('favorite') });
       return;
     }
 
@@ -1091,19 +1468,15 @@ const VideoDetail = () => {
             showCenterTip('取消收藏');
           }
         }
-        // 成功后刷新收藏列表，保持"我的收藏"页同步
-        // 只在非收藏页面时刷新，避免在收藏页面时重复调用
-        const currentPath = window.location.hash || window.location.pathname || '';
-        if (!currentPath.includes('/favorites')) {
-          dispatch(fetchFavorites({ page: 1, size: 20 }));
-        }
+        // 不再自动刷新收藏列表，只在用户进入收藏列表页面时获取
+        // 收藏状态已通过 API 返回的 is_favorite 字段更新
       } else if (code === 401) {
         // 401：账号在其他设备登录
         showCenterTip('账号在其它设备登录，当前设备已下线');
         // 延迟跳转，让用户看到提示
         setTimeout(() => {
           dispatch(logoutUser()).then(() => {
-            navigate('/login');
+            navigate('/login', { state: buildLoginRedirectState('session_conflict') });
           });
         }, 1000);
       } else if (code === 400) {
@@ -1127,7 +1500,7 @@ const VideoDetail = () => {
         showCenterTip('账号在其它设备登录，当前设备已下线');
         setTimeout(() => {
           dispatch(logoutUser()).then(() => {
-            navigate('/login');
+            navigate('/login', { state: buildLoginRedirectState('session_conflict') });
           });
         }, 1000);
       } else if (code === 400) {
@@ -1143,8 +1516,21 @@ const VideoDetail = () => {
 
   // 从指定时间开始播放
   const handlePlayFromTime = (episodeNumber, startTime) => {
-    console.log('handlePlayFromTime called with episodeNumber:', episodeNumber, 'startTime:', startTime);
+    // 🔧 清除拖动定时器（切换视频时清除之前的拖动状态）
+    if (seekTimeoutRef.current) {
+      clearTimeout(seekTimeoutRef.current);
+      seekTimeoutRef.current = null;
+    }
+    
+    // 🎮 使用控制器处理用户续播操作
+    controller.userPlay();
+    setIsPlaying(true);
+    isPlayingRef.current = true;
+    
     setSelectedEpisode(episodeNumber);
+    
+    // 更新窗口标题（如果在新窗口中播放）
+    updateVideoWindowTitle(episodeNumber);
     
     // 存储续播时间，等待播放器准备好后设置
     resumeTimeRef.current = startTime;
@@ -1195,40 +1581,62 @@ const VideoDetail = () => {
   };
 
   // 处理播放进度变化（当前已移除快进配置逻辑，仅保存进度）
+  // 使用 useRef 来限制警告日志的频率
+  const lastProgressWarningTimeRef = useRef(0);
+  
   const handleProgress = (progress) => {
     const { playedSeconds } = progress;
     
-    // 验证 playedSeconds 是否有效
+    // 验证 playedSeconds 是否有效，并获取有效的播放时间
+    let validPlayedSeconds = null;
+    
     if (playedSeconds != null && !isNaN(playedSeconds) && isFinite(playedSeconds) && playedSeconds >= 0) {
-      setPlayedSeconds(Number(playedSeconds));
+      validPlayedSeconds = Number(playedSeconds);
+      setPlayedSeconds(validPlayedSeconds);
     } else {
-      console.warn('⚠️ handleProgress 收到无效的 playedSeconds:', playedSeconds, {
-        type: typeof playedSeconds,
-        isNaN: isNaN(playedSeconds),
-        isFinite: isFinite(playedSeconds),
-        value: playedSeconds
-      });
+      // 🔇 限制警告频率：每5秒最多打印一次
+      const now = Date.now();
+      const shouldWarn = (now - lastProgressWarningTimeRef.current) > 5000;
+      if (shouldWarn) {
+        console.warn('⚠️ handleProgress 收到无效的 playedSeconds:', playedSeconds);
+        lastProgressWarningTimeRef.current = now;
+      }
+      
       // 如果无效，尝试从视频元素获取
       try {
-        const videoElement = reactPlayerRef.current?.getInternalPlayer?.('video') || 
+        const videoElement = (() => {
+                try {
+                  return getVideoElement();
+                } catch (e) {
+                  return null;
+                }
+              })() || 
                            (playerRef.current?.wrapper?.querySelector?.('video'));
-        if (videoElement && videoElement.currentTime && 
+        if (videoElement && videoElement.currentTime != null && 
             !isNaN(videoElement.currentTime) && isFinite(videoElement.currentTime) && 
             videoElement.currentTime >= 0) {
-          const elementTime = Number(videoElement.currentTime);
-          console.log('从视频元素获取到播放进度:', elementTime);
-          setPlayedSeconds(elementTime);
+          validPlayedSeconds = Number(videoElement.currentTime);
+          // 🔇 也限制成功获取的日志频率
+          if (shouldWarn) {
+            console.log('从视频元素获取到播放进度:', validPlayedSeconds);
+          }
+          setPlayedSeconds(validPlayedSeconds);
         } else {
-          // 如果都获取不到，保持当前值不变
-          console.warn('无法获取有效的播放进度，保持当前值');
+          // 如果都获取不到，使用当前 state 中的值（如果有）
+          validPlayedSeconds = playedSeconds; // 保持原值，后续代码会检查
+          if (shouldWarn) {
+            console.warn('无法获取有效的播放进度，跳过本次更新');
+          }
+          return; // 如果无法获取有效值，直接返回，不执行后续逻辑
         }
       } catch (err) {
         console.error('从视频元素获取播放进度失败:', err);
+        return; // 出错时也直接返回
       }
     }
     
     // 如果视频正在播放，清除加载超时定时器（说明视频已经成功加载并开始播放）
-    if (playedSeconds > 0 && videoLoadTimeoutRef.current) {
+    if (validPlayedSeconds != null && validPlayedSeconds > 0 && videoLoadTimeoutRef.current) {
       console.log('视频正在播放，清除加载超时定时器');
       clearTimeout(videoLoadTimeoutRef.current);
       videoLoadTimeoutRef.current = null;
@@ -1241,19 +1649,25 @@ const VideoDetail = () => {
       }
     }
     
+    // 确保 validPlayedSeconds 是有效值
+    if (validPlayedSeconds == null || isNaN(validPlayedSeconds) || !isFinite(validPlayedSeconds)) {
+      console.warn('⚠️ handleProgress: 无法获取有效的播放进度，跳过保存');
+      return;
+    }
+    
     // 每30秒保存一次播放进度到 Redux
-    if (selectedEpisode && Math.floor(playedSeconds) % 30 === 0) {
+    if (selectedEpisode && Math.floor(validPlayedSeconds) % 30 === 0) {
       dispatch(setPlaybackProgress({
         videoId: id,
         episodeId: selectedEpisode,
-        progress: playedSeconds
+        progress: validPlayedSeconds
       }));
     }
     
     // 保存播放记录到本地存储
     // 添加调试信息
     if (!videoInfo) {
-      console.warn('⚠️ handleProgress: videoInfo 不存在，无法保存播放记录', { id, playedSeconds });
+      console.warn('⚠️ handleProgress: videoInfo 不存在，无法保存播放记录', { id, playedSeconds: validPlayedSeconds });
       return;
     }
     
@@ -1268,9 +1682,9 @@ const VideoDetail = () => {
       // 使用 state 中的 duration（通过 onDuration 回调获取）
       // 如果 state 中的 duration 为 0，尝试从 ref 获取（作为后备方案）
       let currentDuration = duration;
-      if ((currentDuration === 0 || !currentDuration) && reactPlayerRef.current && reactPlayerRef.current.getDuration) {
+      if ((currentDuration === 0 || !currentDuration) && playerRefInternal.current && playerRefInternal.current.getDuration) {
         try {
-          const refDuration = reactPlayerRef.current.getDuration();
+          const refDuration = playerRefInternal.current.getDuration();
           if (refDuration && refDuration > 0 && !isNaN(refDuration) && isFinite(refDuration)) {
             currentDuration = Number(refDuration);
             console.log('从 ReactPlayer ref 获取到时长:', currentDuration);
@@ -1285,9 +1699,15 @@ const VideoDetail = () => {
       }
       
       // 如果还是 0，尝试从视频元素直接获取
-      if ((currentDuration === 0 || !currentDuration) && reactPlayerRef.current) {
+      if ((currentDuration === 0 || !currentDuration) && playerRefInternal.current) {
         try {
-          const videoElement = reactPlayerRef.current.getInternalPlayer?.('video') || 
+          const videoElement = (() => {
+                try {
+                  return getVideoElement();
+                } catch (e) {
+                  return null;
+                }
+              })() || 
                              (playerRef.current?.wrapper?.querySelector?.('video'));
           if (videoElement && videoElement.duration && 
               !isNaN(videoElement.duration) && isFinite(videoElement.duration) && 
@@ -1312,28 +1732,28 @@ const VideoDetail = () => {
       
       // 判断是否应该保存：每5秒保存一次，或者首次保存（lastSavedTimeRef.current === 0）
       // 或者进度变化超过1秒（确保重要进度变化被保存）
-      const progressChanged = Math.abs(playedSeconds - lastSavedProgressRef.current) >= 1;
+      const progressChanged = Math.abs(validPlayedSeconds - lastSavedProgressRef.current) >= 1;
       const shouldSave = (
         timeSinceLastSave >= SAVE_INTERVAL || 
         lastSavedTimeRef.current === 0 ||
         progressChanged
       ) && (
-        playedSeconds >= 0 // 包括刚开始播放时（progress = 0）也保存
+        validPlayedSeconds >= 0 // 包括刚开始播放时（progress = 0）也保存
       );
       
       // 添加调试信息（仅在需要保存时输出，减少日志）
       if (shouldSave) {
         console.log('✅ 准备保存播放记录（5秒更新）:', {
           timeSinceLastSave: Math.round(timeSinceLastSave / 1000) + '秒',
-          playedSeconds: Math.round(playedSeconds),
+          playedSeconds: Math.round(validPlayedSeconds),
           progressChanged,
           lastSavedProgress: Math.round(lastSavedProgressRef.current)
         });
       }
       
       if (shouldSave) {
-        console.log('✅ 开始保存播放记录:', { id, episode, playedSeconds, videoType });
-        lastSavedProgressRef.current = playedSeconds;
+        console.log('✅ 开始保存播放记录:', { id, episode, playedSeconds: validPlayedSeconds, videoType });
+        lastSavedProgressRef.current = validPlayedSeconds;
         lastSavedTimeRef.current = now;
         
         // 确保 finalDuration 是有效数字
@@ -1341,8 +1761,8 @@ const VideoDetail = () => {
         let finalDurationValue = currentDuration > 0 && !isNaN(currentDuration) && isFinite(currentDuration) ? Number(currentDuration) : 0;
         
         // 如果还是 0，尝试从 ref 获取（作为后备方案）
-        if (finalDurationValue === 0 && reactPlayerRef.current && reactPlayerRef.current.getDuration) {
-          const refDuration = reactPlayerRef.current.getDuration();
+        if (finalDurationValue === 0 && playerRefInternal.current && playerRefInternal.current.getDuration) {
+          const refDuration = playerRefInternal.current.getDuration();
           if (refDuration > 0 && !isNaN(refDuration) && isFinite(refDuration)) {
             finalDurationValue = Number(refDuration);
             console.log('从 ref 获取到有效时长:', finalDurationValue);
@@ -1350,7 +1770,7 @@ const VideoDetail = () => {
             setDuration(finalDurationValue);
           }
         }
-        const finalProgressValue = playedSeconds >= 0 && !isNaN(playedSeconds) && isFinite(playedSeconds) ? Number(playedSeconds) : 0;
+        const finalProgressValue = validPlayedSeconds >= 0 && !isNaN(validPlayedSeconds) && isFinite(validPlayedSeconds) ? Number(validPlayedSeconds) : 0;
         
         // 如果 finalDurationValue 还是 0，检查是否有已保存的记录，如果有，保留原有的 duration
         if (finalDurationValue === 0) {
@@ -1444,8 +1864,66 @@ const VideoDetail = () => {
     }
   };
 
-  // 视频播放完成时清除播放进度，并自动播放下一集（仅限电视剧/动漫/综艺/纪录片）
+  // 视频播放完成时清除播放进度，并自动播放下一集（仅限有选集语义的视频）
+  const getNextEpisodeNumber = useCallback(() => {
+    const hasSelectedEpisode = selectedEpisode !== null && selectedEpisode !== undefined;
+    const hasEpisodeList = !!(episodes.data && episodes.data.length > 0);
+    if (!hasSelectedEpisode || !hasEpisodeList) {
+      return null;
+    }
+
+    const normalizeEpisodeKey = (value) => {
+      if (value === null || value === undefined) return null;
+      const str = String(value).trim();
+      if (/^\d+$/.test(str)) {
+        return String(Number(str));
+      }
+      return str;
+    };
+
+    const getEpisodeOrderValue = (episode) => {
+      const raw = episode?.episode_number ?? episode?.id ?? 0;
+      const num = Number(raw);
+      return Number.isFinite(num) ? num : 0;
+    };
+
+    const selectedEpisodeKey = normalizeEpisodeKey(selectedEpisode);
+    const currentEpisodeItem = episodes.data.find((episode) => {
+      const episodeNumber = episode.episode_number || episode.id;
+      return normalizeEpisodeKey(episodeNumber) === selectedEpisodeKey;
+    });
+
+    const currentSeason = String(currentEpisodeItem?.season || activeSeason || 1);
+    const currentSeasonEpisodes = episodes.data
+      .filter((episode) => String(episode.season || 1) === currentSeason)
+      .sort((a, b) => getEpisodeOrderValue(a) - getEpisodeOrderValue(b));
+
+    // 自动连播固定按集数正序推进，不受选集列表 UI 的正序/倒序切换影响
+    const currentIndex = currentSeasonEpisodes.findIndex((episode) => {
+      const episodeNumber = episode.episode_number || episode.id;
+      return normalizeEpisodeKey(episodeNumber) === selectedEpisodeKey;
+    });
+
+    if (currentIndex >= 0 && currentIndex < currentSeasonEpisodes.length - 1) {
+      const nextEpisode = currentSeasonEpisodes[currentIndex + 1];
+      return nextEpisode.episode_number || nextEpisode.id;
+    }
+    return null;
+  }, [selectedEpisode, episodes.data, activeSeason]);
+
   const handleEnded = () => {
+    const endedNow = Date.now();
+    if (endedNow - handleEndedDedupeRef.current < 700) {
+      wtvPlayLog('ended.deduped', { videoId: id, episode: selectedEpisode });
+      return;
+    }
+    handleEndedDedupeRef.current = endedNow;
+    wtvPlayLog('ended.enter', { videoId: id, episode: selectedEpisode });
+
+    if (autoNextInFlightRef.current) {
+      wtvPlayLog('autonext.skip.inflight', { videoId: id, episode: selectedEpisode });
+      return;
+    }
     // 保存播放记录，标记为播放完成（进度设为0，从头开始）
     if (videoInfo) {
       // 统一使用 currentCategory 或 videoInfo.type，根据实际视频类型判断
@@ -1457,8 +1935,8 @@ const VideoDetail = () => {
       
       // 获取视频总时长
       let duration = 0;
-      if (reactPlayerRef.current && reactPlayerRef.current.getDuration) {
-        duration = reactPlayerRef.current.getDuration() || 0;
+      if (playerRefInternal.current && playerRefInternal.current.getDuration) {
+        duration = playerRefInternal.current.getDuration() || 0;
       }
       
       // 播放完成，从头开始（进度设为0，但保留时长）
@@ -1480,59 +1958,102 @@ const VideoDetail = () => {
       }));
     }
 
-    // 如果是电视剧/动漫/综艺/纪录片，自动播放下一集
-    // 支持多种类型值：'documentary' 和 'doc' 都表示纪录片
-    const isEpisodeType = videoInfo && (
-      ['tv', 'anime', 'tvshow', 'documentary'].includes(videoInfo.type) || 
-      videoInfo.type === 'doc'
-    );
-    if (isEpisodeType && selectedEpisode && episodes.data && episodes.data.length > 0) {
-      // 获取当前季节的剧集并按集数排序
-      const episodesBySeason = {};
-      episodes.data.forEach(episode => {
-        const season = episode.season || 1;
-        if (!episodesBySeason[season]) {
-          episodesBySeason[season] = [];
-        }
-        episodesBySeason[season].push(episode);
+    // 如果是电视剧/动漫/综艺/纪录片，自动播放下一集（电影不连播）
+    const mappedType = mapVideoType(videoInfo?.type || currentCategory || 'tv');
+    const hasEpisodeContext = selectedEpisode !== null && selectedEpisode !== undefined && !!(episodes.data && episodes.data.length > 0);
+    const isEpisodeType = ['tv', 'anime', 'tvshow', 'doc'].includes(mappedType) || hasEpisodeContext;
+    if (autoNextEpisode && isEpisodeType) {
+      const nextEpisodeNumber = getNextEpisodeNumber();
+      wtvPlayLog('autonext.check', {
+        videoId: id,
+        currentEpisode: selectedEpisode,
+        nextEpisodeNumber,
+        autoNextEpisode,
+        isEpisodeType
       });
-      
-      let currentSeasonEpisodes = (episodesBySeason[activeSeason] || []).sort((a, b) => {
-        return (a.episode_number || 0) - (b.episode_number || 0);
-      });
-      
-      // 根据正序/倒序调整
-      if (episodeOrder === 'desc') {
-        currentSeasonEpisodes = [...currentSeasonEpisodes].reverse();
-      }
-      
-      // 找到当前集数在列表中的位置
-      const currentIndex = currentSeasonEpisodes.findIndex(ep => {
-        const episodeNumber = ep.episode_number || ep.id;
-        return episodeNumber === selectedEpisode;
-      });
-      
-      // 如果有下一集，自动播放
-      if (currentIndex >= 0 && currentIndex < currentSeasonEpisodes.length - 1) {
-        const nextEpisode = currentSeasonEpisodes[currentIndex + 1];
-        const nextEpisodeNumber = nextEpisode.episode_number || nextEpisode.id;
-        console.log('当前集播放完成，自动播放下一集:', nextEpisodeNumber);
-        
-        // 显示提示信息，告知用户正在播放下一集
+      if (nextEpisodeNumber !== null && nextEpisodeNumber !== undefined) {
+        autoNextInFlightRef.current = true;
+        // 关键：结束触发的 pause 不能被识别成“用户手动暂停”，否则下一集会卡在暂停态
+        controller.state.userPaused = false;
+        userPausedRef.current = false;
+        controller.state.isPlaying = true;
+        setIsPlaying(true);
+        isPlayingRef.current = true;
+
+        wtvPlayLog('autonext.goto', { videoId: id, from: selectedEpisode, to: nextEpisodeNumber });
         showCenterTip(`正在播放第${nextEpisodeNumber}集`);
-        
-        // 延迟一点时间再播放下一集，给用户一个缓冲
         setTimeout(() => {
-          handlePlay(nextEpisodeNumber);
+          handlePlay(nextEpisodeNumber, { skipLoginCheck: true, fromAutoNext: true })
+            .finally(() => {
+              setTimeout(() => {
+                autoNextInFlightRef.current = false;
+                wtvPlayLog('autonext.unlocked', { videoId: id });
+              }, 1200);
+            });
         }, 500);
       } else {
-        console.log('已经是最后一集，不自动播放');
+        wtvPlayLog('autonext.lastEpisode', { videoId: id, episode: selectedEpisode });
       }
+    } else if (!autoNextEpisode && isEpisodeType) {
+      wtvPlayLog('autonext.disabled', { videoId: id, episode: selectedEpisode });
     }
   };
 
+  const handlePlayNextEpisode = useCallback(() => {
+    const nextEpisodeNumber = getNextEpisodeNumber();
+    if (nextEpisodeNumber === null || nextEpisodeNumber === undefined) {
+      showCenterTip('已经是最后一集');
+      return;
+    }
+    showCenterTip(`正在播放第${nextEpisodeNumber}集`);
+    handlePlay(nextEpisodeNumber, { skipLoginCheck: true });
+  }, [getNextEpisodeNumber, handlePlay]);
+
+  const toggleAutoNextEpisode = useCallback((options = {}) => {
+    const { showTip = true, nextValue: forcedValue } = options;
+    const nextValue = typeof forcedValue === 'boolean' ? forcedValue : !autoNextEpisode;
+    setAutoNextEpisode(nextValue);
+    updatePlayerSetting('autoNextEpisode', nextValue);
+    if (showTip) {
+      showCenterTip(nextValue ? '已开启自动连播' : '已关闭自动连播');
+    }
+  }, [autoNextEpisode]);
+
   // 处理电影播放（点击海报播放按钮）
-  const handleMoviePlay = () => {
+  const handleMoviePlay = async () => {
+    const canPlay = await promptLoginBeforePlayback();
+    if (!canPlay) {
+      return;
+    }
+
+    if (!isPlayerWindow && window.electronAPI?.openPlayerWindow) {
+      const playbackVideoId = videoInfo?.videoid || videoInfo?.vod_id || id;
+      const normalizedVideo = normalizeVideoInfo({
+        ...(videoInfo || {}),
+        id: playbackVideoId,
+      });
+      window.electronAPI.openPlayerWindow(playbackVideoId, normalizedVideo, null)
+        .then(() => {
+          showCenterTip('已切换到播放窗口');
+        })
+        .catch((err) => {
+          console.error('打开播放窗口失败:', err);
+          showCenterTip('打开播放窗口失败');
+        });
+      return;
+    }
+
+    // 🔧 清除拖动定时器（切换视频时清除之前的拖动状态）
+    if (seekTimeoutRef.current) {
+      clearTimeout(seekTimeoutRef.current);
+      seekTimeoutRef.current = null;
+    }
+    
+    // 🎮 使用控制器处理用户播放电影操作
+    controller.userPlay();
+    setIsPlaying(true);
+    isPlayingRef.current = true;
+    
     // 使用 mapVideoType 统一判断类型
     const apiType = mapVideoType(videoInfo?.type || currentCategory);
     const isMovie = apiType === 'movie';
@@ -1569,10 +2090,12 @@ const VideoDetail = () => {
     
     // 检查是否有播放记录需要续播（从 state 或 localStorage 读取）
     let playHistory = location.state?.playHistory;
+    const fromPlayHistory = !!playHistory; // 标记是否从播放记录页面进入
+    
     if (!playHistory && id) {
       try {
         const storedHistory = getVideoPlayHistory(id);
-        if (storedHistory && storedHistory.episode === null && storedHistory.progress > 0) {
+        if (storedHistory && storedHistory.episode === null && storedHistory.progress > 5) {
           playHistory = storedHistory;
         }
       } catch (error) {
@@ -1581,9 +2104,14 @@ const VideoDetail = () => {
     }
     
     // 如果有续播记录，存储续播时间到 ref，等待播放器准备好后设置
-    if (playHistory && playHistory.episode === null && playHistory.progress > 0) {
+    if (playHistory && playHistory.episode === null && playHistory.progress > 5) {
       resumeTimeRef.current = playHistory.progress;
       console.log('✅ 设置电影续播时间到 ref:', playHistory.progress);
+      
+      // 🎯 如果不是从播放记录页面进入，显示提示
+      if (!fromPlayHistory) {
+        showCenterTip('已继续上次进度播放');
+      }
     } else {
       // 从头播放，清除续播时间
       resumeTimeRef.current = null;
@@ -1632,6 +2160,67 @@ const VideoDetail = () => {
     });
   };
 
+  handlePlayRef.current = handlePlay;
+  handleMoviePlayRef.current = handleMoviePlay;
+
+  const updateRelatedScrollState = useCallback(() => {
+    const grid = relatedVideosGridRef.current;
+    if (!grid) {
+      setCanScrollRelatedLeft(false);
+      setCanScrollRelatedRight(false);
+      return;
+    }
+
+    const maxScrollLeft = grid.scrollWidth - grid.clientWidth;
+    const threshold = 4;
+    setCanScrollRelatedLeft(grid.scrollLeft > threshold);
+    setCanScrollRelatedRight(maxScrollLeft - grid.scrollLeft > threshold);
+  }, []);
+
+  useEffect(() => {
+    updateRelatedScrollState();
+  }, [episodes.recommendations, updateRelatedScrollState]);
+
+  useEffect(() => {
+    const handleResize = () => updateRelatedScrollState();
+    window.addEventListener('resize', handleResize);
+    return () => {
+      window.removeEventListener('resize', handleResize);
+    };
+  }, [updateRelatedScrollState]);
+
+  useEffect(() => {
+    if (!isPlayerWindow || !videoInfo || hasAutoPlayFromPlayerWindowRef.current) {
+      return;
+    }
+
+    const params = new URLSearchParams(location.search);
+    const targetEpisode = pendingAutoPlayEpisodeRef.current || params.get('autoplayEpisode');
+    const videoType = mapVideoType(videoInfo?.type || currentCategory || 'tv');
+    const isMovie = videoType === 'movie';
+
+    if (!isMovie) {
+      if (!targetEpisode || !episodes.data || episodes.data.length === 0) {
+        return;
+      }
+      const hasTargetEpisode = episodes.data.some((episode) => {
+        const episodeNumber = episode.episode_number || episode.id;
+        return String(episodeNumber) === String(targetEpisode);
+      });
+      if (!hasTargetEpisode) {
+        return;
+      }
+      hasAutoPlayFromPlayerWindowRef.current = true;
+      handlePlayRef.current?.(targetEpisode);
+      return;
+    }
+
+    if (params.get('autoplay') === 'true') {
+      hasAutoPlayFromPlayerWindowRef.current = true;
+      handleMoviePlayRef.current?.();
+    }
+  }, [isPlayerWindow, videoInfo, episodes.data, currentCategory, location.search]);
+
   // 播放器准备就绪回调
   const handlePlayerReady = () => {
     console.log('播放器准备就绪');
@@ -1656,13 +2245,23 @@ const VideoDetail = () => {
     // 延迟检查视频元素状态，确保视频真正准备好
     setTimeout(() => {
       try {
-        const videoElement = reactPlayerRef.current?.getInternalPlayer?.('video') || 
+        const videoElement = (() => {
+                try {
+                  return getVideoElement();
+                } catch (e) {
+                  return null;
+                }
+              })() || 
                            (playerRef.current?.wrapper?.querySelector?.('video'));
         
         if (!videoElement || !document.contains(videoElement)) {
           console.warn('视频元素不存在或已被移除');
           return;
         }
+        
+        // 使用 ArtPlayer 自带控件：关闭原生 controls，避免重复控制条
+        videoElement.removeAttribute('controls');
+        videoElement.controls = false;
         
         // 如果有续播时间，先设置续播时间
         if (resumeTime !== null && resumeTime !== undefined) {
@@ -1719,7 +2318,18 @@ const VideoDetail = () => {
                       console.error('设置 HLS 续播时间时出错:', error);
                     }
                   }
-                  console.log('HLS 视频已准备好，设置播放状态');
+                  console.log('HLS 视频已准备好，检查是否可以播放');
+                  console.log('🔍 状态检查:', {
+                    'userPausedRef.current': userPausedRef.current,
+                    'controller.state.userPaused': controller.state.userPaused,
+                    'isPlaying': isPlaying,
+                    'isPlayingRef.current': isPlayingRef.current,
+                    'canPlay': controller.canPlay()
+                  });
+                  
+                  // 🎮 使用控制器判断是否可以播放
+                  if (controller.canPlay()) {
+                    console.log('✅ 可以播放，开始播放');
     setIsPlaying(true);
                   if (videoElement.paused && !isSeekingRef.current) {
                     videoElement.play().catch(err => {
@@ -1727,6 +2337,9 @@ const VideoDetail = () => {
                         console.warn('HLS 播放失败:', err);
                       }
                     });
+                    }
+                  } else {
+                    console.log('❌ 不能播放（userPaused =', controller.state.userPaused, '）');
                   }
                 } else {
                   // 如果还没准备好，等待 canplay 事件
@@ -1742,7 +2355,10 @@ const VideoDetail = () => {
                           console.error('设置 HLS 续播时间时出错:', error);
                         }
                       }
-                      console.log('HLS 视频可以播放，设置播放状态');
+                      console.log('HLS 视频可以播放，检查是否可以播放');
+                      // 🎮 使用控制器判断是否可以播放
+                      if (controller.canPlay()) {
+                        console.log('✅ 可以播放，开始播放');
                       setIsPlaying(true);
                       if (videoElement.paused && !isSeekingRef.current) {
                         videoElement.play().catch(err => {
@@ -1750,6 +2366,9 @@ const VideoDetail = () => {
                             console.warn('HLS 播放失败:', err);
                           }
                         });
+                        }
+                      } else {
+                        console.log('❌ 不能播放（userPaused =', controller.state.userPaused, '）');
                       }
                     }
                     videoElement.removeEventListener('canplay', onCanPlay);
@@ -1768,6 +2387,8 @@ const VideoDetail = () => {
                 const waitForReady = () => {
                   if (document.contains(videoElement) && videoElement.readyState >= 1) {
                     console.log('HLS 视频已准备好，设置播放状态');
+                    // 只有在用户没有手动暂停时才自动播放
+                    if (!userPausedRef.current) {
                     setIsPlaying(true);
                     if (videoElement.paused && !isSeekingRef.current) {
                       videoElement.play().catch(err => {
@@ -1775,12 +2396,17 @@ const VideoDetail = () => {
                           console.warn('HLS 播放失败:', err);
                         }
                       });
+                      }
+                    } else {
+                      console.log('用户已手动暂停，不自动播放');
                     }
                   } else {
                     // 等待 canplay 事件
                     const onCanPlay = () => {
                       if (document.contains(videoElement)) {
                         console.log('HLS 视频可以播放，设置播放状态');
+                        // 只有在用户没有手动暂停时才自动播放
+                        if (!userPausedRef.current) {
                         setIsPlaying(true);
                         if (videoElement.paused && !isSeekingRef.current) {
                           videoElement.play().catch(err => {
@@ -1788,6 +2414,9 @@ const VideoDetail = () => {
                               console.warn('HLS 播放失败:', err);
                             }
                           });
+                          }
+                        } else {
+                          console.log('用户已手动暂停，不自动播放');
                         }
                       }
                       videoElement.removeEventListener('canplay', onCanPlay);
@@ -1804,6 +2433,8 @@ const VideoDetail = () => {
     setTimeout(() => {
                 if (document.contains(videoElement) && videoElement.readyState >= 1) {
                   console.log('HLS manifest 解析超时，尝试播放');
+                  // 只有在用户没有手动暂停时才自动播放
+                  if (!userPausedRef.current) {
                   setIsPlaying(true);
                   if (videoElement.paused && !isSeekingRef.current) {
                     videoElement.play().catch(err => {
@@ -1811,6 +2442,9 @@ const VideoDetail = () => {
                         console.warn('HLS 播放失败:', err);
                       }
                     });
+                    }
+                  } else {
+                    console.log('用户已手动暂停，不自动播放');
                   }
                 }
               }, 5000);
@@ -1841,7 +2475,10 @@ const VideoDetail = () => {
               console.error('设置续播时间时出错:', error);
             }
           }
-          console.log('视频元素已准备好 (readyState >= 3)，设置播放状态');
+          console.log('视频元素已准备好 (readyState >= 3)，检查是否可以播放');
+          // 🎮 使用控制器判断是否可以播放
+          if (controller.canPlay()) {
+            console.log('✅ 可以播放，开始播放');
           setIsPlaying(true);
           if (videoElement.paused && !isSeekingRef.current) {
             videoElement.play().catch(err => {
@@ -1849,6 +2486,9 @@ const VideoDetail = () => {
                 console.warn('播放失败:', err);
               }
             });
+            }
+          } else {
+            console.log('❌ 不能播放（userPaused =', controller.state.userPaused, '）');
           }
         } else if (videoElement.readyState >= 2) {
           // readyState >= 2，等待 canplaythrough 事件（表示可以流畅播放）
@@ -1865,7 +2505,10 @@ const VideoDetail = () => {
                   console.error('设置续播时间时出错:', error);
                 }
               }
-              console.log('视频可以流畅播放，设置播放状态');
+              console.log('视频可以流畅播放，检查是否可以播放');
+              // 🎮 使用控制器判断是否可以播放
+              if (controller.canPlay()) {
+                console.log('✅ 可以播放，开始播放');
               setIsPlaying(true);
               if (videoElement.paused && !isSeekingRef.current) {
                 videoElement.play().catch(err => {
@@ -1873,6 +2516,15 @@ const VideoDetail = () => {
                     console.warn('播放失败:', err);
                   }
                 });
+                }
+              } else {
+                console.log('❌ 不能播放（userPaused =', controller.state.userPaused, '）');
+                // 确保视频元素处于暂停状态
+                if (!videoElement.paused) {
+                  videoElement.pause().catch(() => {});
+                }
+                setIsPlaying(false);
+                isPlayingRef.current = false;
               }
             }
             videoElement.removeEventListener('canplaythrough', onCanPlayThrough);
@@ -1895,7 +2547,10 @@ const VideoDetail = () => {
                   console.error('设置续播时间时出错:', error);
                 }
               }
-              console.log('视频可以播放，设置播放状态');
+              console.log('视频可以播放，检查是否可以播放');
+              // 🎮 使用控制器判断是否可以播放
+              if (controller.canPlay()) {
+                console.log('✅ 可以播放，开始播放');
               setIsPlaying(true);
               if (videoElement.paused && !isSeekingRef.current) {
                 videoElement.play().catch(err => {
@@ -1903,6 +2558,15 @@ const VideoDetail = () => {
                     console.warn('播放失败:', err);
                   }
                 });
+                }
+              } else {
+                console.log('❌ 不能播放（userPaused =', controller.state.userPaused, '）');
+                // 确保视频元素处于暂停状态
+                if (!videoElement.paused) {
+                  videoElement.pause().catch(() => {});
+                }
+                setIsPlaying(false);
+                isPlayingRef.current = false;
               }
             }
             videoElement.removeEventListener('canplay', onCanPlay);
@@ -1970,8 +2634,12 @@ const VideoDetail = () => {
         
         // 放宽条件：即使 selectedEpisode 已设置，如果集数匹配，也允许续播
         if (episodeExists && (selectedEpisode === null || selectedEpisode === undefined || selectedEpisode === playHistory.episode)) {
-          console.log('✅ 从播放记录自动选择集数:', playHistory.episode, '续播进度:', playHistory.progress);
+          if (hasAutoPlayFromHistoryRef.current) {
+            wtvPlayLog('history.autoplay.skipDuplicate', { videoId: id, episode: playHistory.episode });
+            return;
+          }
           hasAutoPlayFromHistoryRef.current = true;
+          console.log('✅ 从播放记录自动选择集数:', playHistory.episode, '续播进度:', playHistory.progress);
           setTimeout(() => {
             const progress = Number(playHistory.progress) || 0;
             const duration = Number(playHistory.duration) || 0;
@@ -2015,20 +2683,23 @@ const VideoDetail = () => {
         }
       }, 300);
     }
-  }, [videoInfo, episodes.data, selectedEpisode, isMoviePlaying, isEpisodePlaying, handlePlay, handlePlayFromTime, handleMoviePlay, reactPlayerRef, playerRef, setIsPlaying]);
+  }, [videoInfo, episodes.data, selectedEpisode, isMoviePlaying, isEpisodePlaying, handlePlay, handlePlayFromTime, handleMoviePlay, playerRefInternal, playerRef, setIsPlaying]);
   
   // 从播放记录跳转时，自动选择对应的集数并开始播放
   // 注意：此 useEffect 必须在 executeAutoPlayFromHistory 定义之后
+  // 重要：只有从播放记录列表进入时才续播（通过 location.state?.playHistory 判断）
+  // 从其他列表进入时，即使有播放记录，也不续播，但播放时会更新播放记录
   useEffect(() => {
-    // 优先从 location.state 获取播放记录
+    // 优先从 location.state 获取播放记录（只有从播放记录列表进入时才会传递）
     let playHistory = location.state?.playHistory;
     
     // 如果没有从 state 获取到，尝试从 Electron API 获取的 videoData 中读取
+    // 这是为了支持 Electron 窗口打开的情况（从播放记录列表打开时）
     if (!playHistory && window.electronAPI && window.electronAPI.getVideoData) {
       window.electronAPI.getVideoData().then((data) => {
         if (data?.playHistory) {
           const electronPlayHistory = data.playHistory;
-          console.log('✅ 从 Electron API 获取播放记录:', electronPlayHistory);
+          console.log('✅ 从 Electron API 获取播放记录（从播放记录列表进入）:', electronPlayHistory);
           // 如果 videoInfo 已加载，立即执行续播逻辑
           if (videoInfo && !hasAutoPlayFromHistoryRef.current) {
             console.log('videoInfo 已加载，立即执行续播逻辑（Electron API）');
@@ -2042,33 +2713,13 @@ const VideoDetail = () => {
       }).catch(err => {
         console.error('从 Electron API 获取播放记录失败:', err);
       });
+      return; // 等待 Electron API 回调
     }
     
-    // 如果还是没有，尝试从 localStorage 读取（作为最后的备用方案）
-    if (!playHistory && id) {
-      try {
-        const storedHistory = getVideoPlayHistory(id);
-        console.log('从 localStorage 读取播放记录:', storedHistory);
-        if (storedHistory && (storedHistory.progress > 0 || storedHistory.duration > 0)) {
-          playHistory = {
-            videoId: storedHistory.videoId,
-            videoTitle: storedHistory.videoTitle,
-            videoCover: storedHistory.videoCover,
-            videoType: storedHistory.videoType,
-            episode: storedHistory.episode,
-            progress: storedHistory.progress,
-            duration: storedHistory.duration
-          };
-          console.log('✅ 从 localStorage 读取播放记录用于续播:', playHistory);
-        }
-      } catch (error) {
-        console.error('从 localStorage 读取播放记录失败:', error);
-      }
-    }
-    
-    // 如果已经处理过，或者没有播放记录，直接返回
+    // 如果没有从 state 或 Electron API 获取到 playHistory，说明不是从播放记录列表进入
+    // 不执行续播，但播放时会正常更新播放记录
     if (!playHistory) {
-      console.log('没有播放记录，跳过续播');
+      console.log('不是从播放记录列表进入，跳过续播（但播放时会更新播放记录）');
       return;
     }
     
@@ -2082,17 +2733,19 @@ const VideoDetail = () => {
       return;
     }
     
-    // 执行续播逻辑
-    console.log('✅ 准备执行续播逻辑，播放记录:', playHistory);
+    // 执行续播逻辑（只有从播放记录列表进入时才会执行到这里）
+    console.log('✅ 从播放记录列表进入，准备执行续播逻辑，播放记录:', playHistory);
     executeAutoPlayFromHistory(playHistory);
-  }, [location.state, videoInfo, episodes.data, selectedEpisode, isMoviePlaying, isEpisodePlaying, id, executeAutoPlayFromHistory]);
+  }, [location.state, videoInfo, episodes.data, selectedEpisode, isMoviePlaying, isEpisodePlaying, executeAutoPlayFromHistory]);
   
   // 当 videoInfo 加载完成后，如果之前从 Electron API 获取到了 playHistory，也触发续播
+  // 注意：只有从播放记录列表进入时才会执行续播
   useEffect(() => {
     if (videoInfo && window.electronAPI && window.electronAPI.getVideoData && !hasAutoPlayFromHistoryRef.current) {
       window.electronAPI.getVideoData().then((data) => {
-        if (data?.playHistory && !location.state?.playHistory) {
-          console.log('videoInfo 加载完成，从 Electron API 获取播放记录并续播:', data.playHistory);
+        // 只有从播放记录列表进入时（通过 location.state 或 Electron API 传递 playHistory）才续播
+        if (data?.playHistory && (location.state?.playHistory || data.playHistory)) {
+          console.log('videoInfo 加载完成，从 Electron API 获取播放记录并续播（从播放记录列表进入）:', data.playHistory);
           executeAutoPlayFromHistory(data.playHistory);
         }
       }).catch(err => {
@@ -2100,6 +2753,180 @@ const VideoDetail = () => {
       });
     }
   }, [videoInfo, executeAutoPlayFromHistory, location.state]);
+
+  // 初始化全屏状态
+  useEffect(() => {
+    const checkFullscreen = () => {
+      const currentlyFullscreen = !!(document.fullscreenElement || 
+                                     document.webkitFullscreenElement || 
+                                     document.mozFullScreenElement || 
+                                     document.msFullscreenElement);
+      setIsFullscreen(currentlyFullscreen);
+    };
+    
+    checkFullscreen();
+    
+    // 监听全屏变化
+    document.addEventListener('fullscreenchange', checkFullscreen);
+    document.addEventListener('webkitfullscreenchange', checkFullscreen);
+    document.addEventListener('mozfullscreenchange', checkFullscreen);
+    document.addEventListener('MSFullscreenChange', checkFullscreen);
+    
+    return () => {
+      document.removeEventListener('fullscreenchange', checkFullscreen);
+      document.removeEventListener('webkitfullscreenchange', checkFullscreen);
+      document.removeEventListener('mozfullscreenchange', checkFullscreen);
+      document.removeEventListener('MSFullscreenChange', checkFullscreen);
+    };
+  }, []);
+
+  // 播放器就绪后，持续同步“文档全屏状态”与“Electron 窗口全屏状态”
+  // 避免出现“窗口全屏残留，导致后续无法正常退出”的情况
+  useEffect(() => {
+    if (!playerReady) return;
+
+    const syncFullscreenState = () => {
+      const currentlyFullscreen = !!(
+        document.fullscreenElement ||
+        document.webkitFullscreenElement ||
+        document.mozFullScreenElement ||
+        document.msFullscreenElement
+      );
+      setIsFullscreen(currentlyFullscreen);
+
+      if (!currentlyFullscreen && window.electronAPI?.isFullScreen && window.electronAPI?.setFullScreen) {
+        window.electronAPI.isFullScreen()
+          .then((isWindowFullscreen) => {
+            if (isWindowFullscreen) {
+              window.electronAPI.setFullScreen(false).catch(() => {});
+            }
+          })
+          .catch(() => {});
+      }
+    };
+
+    const handleEscSync = (event) => {
+      if (event.key !== 'Escape') return;
+      syncFullscreenState();
+    };
+
+    const syncTimer = window.setInterval(syncFullscreenState, 1200);
+
+    document.addEventListener('fullscreenchange', syncFullscreenState);
+    document.addEventListener('webkitfullscreenchange', syncFullscreenState);
+    document.addEventListener('mozfullscreenchange', syncFullscreenState);
+    document.addEventListener('MSFullscreenChange', syncFullscreenState);
+    document.addEventListener('keydown', handleEscSync);
+
+    return () => {
+      window.clearInterval(syncTimer);
+      document.removeEventListener('fullscreenchange', syncFullscreenState);
+      document.removeEventListener('webkitfullscreenchange', syncFullscreenState);
+      document.removeEventListener('mozfullscreenchange', syncFullscreenState);
+      document.removeEventListener('MSFullscreenChange', syncFullscreenState);
+      document.removeEventListener('keydown', handleEscSync);
+    };
+  }, [playerReady]);
+
+  const togglePlayerFullscreen = useCallback(async () => {
+    const getDocFullscreenElement = () => (
+      document.fullscreenElement ||
+      document.webkitFullscreenElement ||
+      document.mozFullScreenElement ||
+      document.msFullscreenElement ||
+      null
+    );
+
+    const exitDocFullscreen = async () => {
+      if (document.exitFullscreen) return document.exitFullscreen();
+      if (document.webkitExitFullscreen) return document.webkitExitFullscreen();
+      if (document.mozCancelFullScreen) return document.mozCancelFullScreen();
+      if (document.msExitFullscreen) return document.msExitFullscreen();
+      return Promise.resolve();
+    };
+
+    const requestDocFullscreen = async (element) => {
+      if (!element) return Promise.reject(new Error('no-fullscreen-element'));
+      if (element.requestFullscreen) return element.requestFullscreen();
+      if (element.webkitRequestFullscreen) return element.webkitRequestFullscreen();
+      if (element.mozRequestFullScreen) return element.mozRequestFullScreen();
+      if (element.msRequestFullscreen) return element.msRequestFullscreen();
+      return Promise.reject(new Error('fullscreen-not-supported'));
+    };
+
+    try {
+      const isDocFullscreen = !!getDocFullscreenElement();
+      if (isDocFullscreen) {
+        await exitDocFullscreen();
+        setIsFullscreen(false);
+        if (window.electronAPI?.setFullScreen) {
+          window.electronAPI.setFullScreen(false).catch(() => {});
+        }
+        return;
+      }
+
+      if (window.electronAPI?.isFullScreen && window.electronAPI?.setFullScreen) {
+        try {
+          const isWindowFullscreen = await window.electronAPI.isFullScreen();
+          if (isWindowFullscreen) {
+            await window.electronAPI.setFullScreen(false);
+            // 处于“窗口全屏但文档未全屏”的异常状态时，
+            // 本次点击仅用于退出窗口全屏，避免立即再次进入全屏导致无法退出。
+            setIsFullscreen(false);
+            return;
+          }
+        } catch (_) {
+          // ignore
+        }
+      }
+
+      const videoElement = (() => {
+        try {
+          return getVideoElement();
+        } catch (e) {
+          return null;
+        }
+      })() || playerRef.current?.wrapper?.querySelector?.('video');
+
+      const fullscreenTarget = playerRef.current?.wrapper || videoElement?.parentElement || videoElement;
+      await requestDocFullscreen(fullscreenTarget);
+      setIsFullscreen(true);
+    } catch (err) {
+      console.error('切换全屏失败:', err);
+    }
+  }, [getVideoElement]);
+
+  const togglePictureInPicture = useCallback(async () => {
+    try {
+      const videoElement = (() => {
+        try {
+          return getVideoElement();
+        } catch (e) {
+          return null;
+        }
+      })() || (playerRef.current?.wrapper?.querySelector?.('video'));
+
+      if (!videoElement || !document.pictureInPictureEnabled) {
+        console.warn('画中画功能不可用');
+        return;
+      }
+
+      if (document.pictureInPictureElement) {
+        await document.exitPictureInPicture();
+        setIsPictureInPicture(false);
+      } else {
+        await videoElement.requestPictureInPicture();
+        setIsPictureInPicture(true);
+      }
+    } catch (err) {
+      console.error('画中画操作失败:', err);
+    }
+  }, [getVideoElement]);
+
+  const handleVideoFitModeChange = useCallback((mode) => {
+    setVideoFitMode(mode);
+    localStorage.setItem('wtv_video_fit_mode', mode);
+  }, []);
 
   // 处理点击推荐视频，在新窗口打开视频详情页
   const handleRelatedVideoClick = (e, video) => {
@@ -2236,19 +3063,20 @@ const VideoDetail = () => {
     // 每20集为一组（仅在超过20集时使用）
     const episodeGroups = [];
     let currentGroup = [];
+    let validGroupIndex = 0;
     
     if (shouldShowGroupTabs) {
       for (let i = 0; i < currentSeasonEpisodes.length; i += 20) {
         episodeGroups.push(currentSeasonEpisodes.slice(i, i + 20));
       }
       // 确保activeEpisodeGroup在有效范围内
-      const validGroupIndex = Math.min(activeEpisodeGroup, episodeGroups.length - 1);
+      validGroupIndex = Math.min(activeEpisodeGroup, episodeGroups.length - 1);
       currentGroup = episodeGroups[validGroupIndex] || [];
     } else {
       // 不超过20集，直接显示所有集数
       currentGroup = currentSeasonEpisodes;
     }
-    
+
     return (
       <div className="episode-list-sidebar">
         {/* 顶部标题栏 */}
@@ -2271,8 +3099,8 @@ const VideoDetail = () => {
         
         {/* 分段切换栏 - 仅在超过20集时显示 */}
         {shouldShowGroupTabs && (
-          <div className="episode-group-tabs">
-            <div className="episode-group-tabs-scroll">
+            <div className="episode-group-tabs">
+              <div className="episode-group-tabs-scroll">
               {episodeGroups.map((group, groupIndex) => {
                 const startNum = group[0]?.episode_number || (groupIndex * 20 + 1);
                 const endNum = group[group.length - 1]?.episode_number || (groupIndex * 20 + group.length);
@@ -2283,7 +3111,7 @@ const VideoDetail = () => {
                   const selectedGroupIndex = episodeGroups.findIndex(group => 
                     group.some(ep => {
                       const episodeNumber = ep.episode_number || ep.id;
-                      return episodeNumber === selectedEpisode;
+                      return String(episodeNumber) === String(selectedEpisode);
                     })
                   );
                   if (selectedGroupIndex >= 0) {
@@ -2310,8 +3138,8 @@ const VideoDetail = () => {
                   </button>
                 );
               })}
+              </div>
             </div>
-          </div>
         )}
         
         {/* 集数网格 */}
@@ -2412,7 +3240,7 @@ const VideoDetail = () => {
       : '';
     
     return (
-      <div className="video-detail-content-new">
+      <div className={`video-detail-content-new ${isVideoPlaying ? 'playing-mode' : ''}`}>
         {/* 顶部：16:9播放器区域（无播放时使用海报背景+高斯模糊） */}
         <div className={`video-detail-player-section ${isVideoPlaying ? 'player-expanded' : ''} ${showFullDescription ? 'desc-expanded' : ''}`}>
           {/* 背景层 - 只在未播放时显示 */}
@@ -2446,6 +3274,12 @@ const VideoDetail = () => {
                       src={videoInfo.cover_url || videoInfo.pic}
                       alt={videoInfo.title || videoInfo.name || '封面'}
                     />
+                    {/* 评分覆盖层 */}
+                    {(videoInfo.score || videoInfo.rating) && (
+                      <div className="video-rating-overlay">
+                        <StarRating score={parseFloat(videoInfo.score || videoInfo.rating || 0)} />
+                      </div>
+                    )}
                     {/* 电影播放按钮 - 移至海报上 */}
                     {isMovieType && !isMoviePlaying && (
                       <div 
@@ -2505,12 +3339,6 @@ const VideoDetail = () => {
                         )}
                       </h1>
                     </div>
-                    {(videoInfo.score || videoInfo.rating) && (
-                      <StarRating
-                        score={parseFloat(videoInfo.score || videoInfo.rating || 0)}
-                        className="title-rating"
-                      />
-                    )}
                   </div>
             
             {/* 标签组：胶囊状按钮 */}
@@ -2621,8 +3449,8 @@ const VideoDetail = () => {
           </div>
           )}
           
-              {/* 继续观看 */}
-              {renderWatchHistory()}
+              {/* 继续观看（播放页面不显示） */}
+              {!isVideoPlaying && renderWatchHistory()}
 
               {/* 为你推荐 */}
               {renderRelatedVideos()}
@@ -2683,8 +3511,12 @@ const VideoDetail = () => {
     // 判断是否正在播放任何类型
     const type = mapVideoType(videoInfo?.type);
     const isMovieType = type === 'movie';
+    // 使用播放状态作为主判定，避免 videoInfo.type 尚未就绪时控制栏按钮延迟出现
+    const isEpisodeType = !isMovieType && isEpisodePlaying;
     // 只要 isMoviePlaying 或 isEpisodePlaying 为真，就应该渲染播放器
     const isVideoPlaying = isMoviePlaying || isEpisodePlaying;
+    const nextEpisodeNumber = isEpisodeType ? getNextEpisodeNumber() : null;
+    const canNextEpisode = nextEpisodeNumber !== null && nextEpisodeNumber !== undefined;
     
     console.log('renderPlayer called:', { 
       type, 
@@ -2707,6 +3539,27 @@ const VideoDetail = () => {
             <div className="loading">
               加载中...
             </div>
+            {isEpisodeType && (
+              <div className="player-loading-actions">
+                <button
+                  className={`player-loading-action-btn ${!canNextEpisode ? 'is-disabled' : ''}`}
+                  disabled={!canNextEpisode}
+                  onClick={() => {
+                    if (canNextEpisode) {
+                      handlePlayNextEpisode();
+                    }
+                  }}
+                >
+                  下一集
+                </button>
+                <button
+                  className={`player-loading-action-btn ${autoNextEpisode ? 'is-active' : ''}`}
+                  onClick={() => toggleAutoNextEpisode({ showTip: true })}
+                >
+                  连播：{autoNextEpisode ? '开' : '关'}
+                </button>
+              </div>
+            )}
           </div>
         </div>
       );
@@ -2829,41 +3682,57 @@ const VideoDetail = () => {
 
             return (
       <div className="video-detail-player-overlay">
+        <div className="player-ui-shell">
         <div className="video-player-container-inline" ref={el => {
           if (el) {
             playerRef.current = {wrapper: el};
           }
         }}>
-          <ReactPlayer
-            ref={reactPlayerRef}
+          <MyArtPlayer
+            ref={playerRefInternal}
             key={`player-${id}-${selectedEpisode || 'movie'}-${playUrl.url}`}
             url={playUrl.url}
-            controls
-            playing={isPlaying}
-            muted={muted}
-            light={false}
+            videoId={id}
+            playing={controller.canPlay()}
             volume={volume}
-            width="100%"
-            height="100%"
+            muted={muted}
             playbackRate={playbackRate}
-            playsinline={true}
-            config={{
-              file: {
-                forceHLS: !playUrl.url?.toLowerCase().endsWith('.mp4'),
-                hlsOptions: {
-                  enableWorker: true,
-                  lowLatencyMode: true,
-                  backBufferLength: 90
-                },
-                attributes: {
-                  controlsList: 'nodownload',
-                  disablePictureInPicture: true,
-                  preload: 'auto'
-                }
+            videoFitMode={videoFitMode}
+            onVideoFitModeChange={handleVideoFitModeChange}
+            autoNextEpisode={autoNextEpisode}
+            onToggleAutoNextEpisode={(nextValue) => toggleAutoNextEpisode({ showTip: true, nextValue })}
+            isFullscreen={isFullscreen}
+            onToggleFullscreen={togglePlayerFullscreen}
+            isPictureInPicture={isPictureInPicture}
+            pictureInPictureEnabled={document.pictureInPictureEnabled}
+            onTogglePictureInPicture={togglePictureInPicture}
+            showNextEpisodeButton={isEpisodeType}
+            canNextEpisode={canNextEpisode}
+            onNextEpisodeClick={handlePlayNextEpisode}
+            onNextEpisode={handleEnded}
+            onVolumeChange={(newVolume, newMuted) => {
+              if (Math.abs(currentVolumeRef.current - newVolume) > 0.01 || currentMutedRef.current !== newMuted) {
+                currentVolumeRef.current = newVolume;
+                currentMutedRef.current = newMuted;
+                setVolume(newVolume);
+                setMuted(newMuted);
+                updatePlayerSetting('volume', newVolume);
+                updatePlayerSetting('muted', newMuted);
+              }
+            }}
+            onRateChange={(newRate) => {
+              if (Math.abs(currentPlaybackRateRef.current - newRate) > 0.01) {
+                currentPlaybackRateRef.current = newRate;
+                setPlaybackRate(newRate);
+                updatePlayerSetting('playbackRate', newRate);
               }
             }}
             onReady={() => {
               console.log('ReactPlayer onReady 被调用，准备开始播放');
+              // 🎮 设置播放器准备状态
+              controller.setPlayerReady(true);
+              setPlayerReady(true);
+              
               // 清除加载超时
               if (videoLoadTimeoutRef.current) {
                 clearTimeout(videoLoadTimeoutRef.current);
@@ -2873,12 +3742,26 @@ const VideoDetail = () => {
               setVideoLoadTimeout(false);
               handlePlayerReady();
               
-              // 添加视频元素的事件监听，用于处理播放过程中的错误和缓冲
+              // 使用 ArtPlayer 自带控件：确保原生 controls 关闭，避免重复控制条
               setTimeout(() => {
                 try {
-                  const videoElement = reactPlayerRef.current?.getInternalPlayer?.('video') || 
+                  const videoElement = (() => {
+                try {
+                  return getVideoElement();
+                } catch (e) {
+                  return null;
+                }
+              })() ||
                                      (playerRef.current?.wrapper?.querySelector?.('video'));
                   if (videoElement && document.contains(videoElement)) {
+                    videoElement.removeAttribute('controls');
+                    videoElement.controls = false;
+                    
+                    // 应用视频显示模式
+                    if (videoElement.style) {
+                      videoElement.style.objectFit = videoFitMode;
+                    }
+                    
                     // 清理之前的事件监听器（如果存在）
                     if (videoElement._eventListeners) {
                       videoElement._eventListeners.forEach(({ type, handler }) => {
@@ -2886,23 +3769,226 @@ const VideoDetail = () => {
                       });
                     }
                     
+                    // 设置初始音量、静音和播放速度（仅在首次准备好时）
+                    // 注意：这里使用当前的 state 值（volume, muted, playbackRate），这些值已经包含了用户的调整
+                    if (!hasAppliedInitialSettingsRef.current) {
+                      // 延迟设置，确保视频元素完全准备好
+                      setTimeout(() => {
+                        if (videoElement && document.contains(videoElement)) {
+                          // 设置同步标志，避免事件监听器触发
+                          isSyncingSettingsRef.current = true;
+                          
+                          // 使用当前的 state 值，这些值已经包含了用户的调整
+                          videoElement.volume = volume;
+                          videoElement.muted = muted;
+                          videoElement.playbackRate = playbackRate;
+                          
+                          // 同步更新 ref，避免事件监听误判
+                          currentVolumeRef.current = volume;
+                          currentMutedRef.current = muted;
+                          currentPlaybackRateRef.current = playbackRate;
+                          hasAppliedInitialSettingsRef.current = true;
+                          
+                          console.log('在onReady中应用播放器设置:', { volume, muted, playbackRate });
+                          
+                          // 清除同步标志
+                          setTimeout(() => {
+                            isSyncingSettingsRef.current = false;
+                          }, 200);
+                        }
+                      }, 100);
+                    } else {
+                      // 如果已经应用过初始设置，但视频元素的值与 state 不同，也需要同步
+                      // 这通常发生在视频重新加载时（比如切换集数）
+                      setTimeout(() => {
+                        if (videoElement && document.contains(videoElement)) {
+                          const volumeDiff = Math.abs(videoElement.volume - volume);
+                          const rateDiff = Math.abs(videoElement.playbackRate - playbackRate);
+                          
+                          // 如果值不同，同步到视频元素（使用当前的 state 值）
+                          if (volumeDiff > 0.01 || videoElement.muted !== muted || rateDiff > 0.01) {
+                            console.log('视频重新加载，同步播放器设置到视频元素:', { 
+                              volume, 
+                              muted, 
+                              playbackRate,
+                              currentVolume: videoElement.volume,
+                              currentMuted: videoElement.muted,
+                              currentRate: videoElement.playbackRate
+                            });
+                            
+                            isSyncingSettingsRef.current = true;
+                            videoElement.volume = volume;
+                            videoElement.muted = muted;
+                            videoElement.playbackRate = playbackRate;
+                            currentVolumeRef.current = volume;
+                            currentMutedRef.current = muted;
+                            currentPlaybackRateRef.current = playbackRate;
+                            
+                            setTimeout(() => {
+                              isSyncingSettingsRef.current = false;
+                            }, 200);
+                          }
+                        }
+                      }, 100);
+                    }
+                    
+                    // 监听音量变化（添加防抖处理，避免频繁触发导致音频卡顿）
+                    let volumeChangeTimeout = null;
+                    const onVolumeChange = () => {
+                      // 如果正在同步设置，忽略事件（避免循环）
+                      if (isSyncingSettingsRef.current) {
+                        return;
+                      }
+
+                      const newVolume = videoElement.volume;
+                      const newMuted = videoElement.muted;
+                      
+                      // 如果值没有变化，忽略（可能是我们刚刚设置的）
+                      if (Math.abs(currentVolumeRef.current - newVolume) < 0.01 && 
+                          currentMutedRef.current === newMuted) {
+                        return;
+                      }
+                      
+                      console.log('检测到音量变化:', { 
+                        newVolume, 
+                        newMuted,
+                        prevVolume: currentVolumeRef.current, 
+                        prevMuted: currentMutedRef.current 
+                      });
+                      
+                      // 立即更新 ref，避免重复触发
+                      currentVolumeRef.current = newVolume;
+                      currentMutedRef.current = newMuted;
+                      
+                      // 立即更新 state，确保 UI 同步（不延迟）
+                      setVolume(newVolume);
+                      setMuted(newMuted);
+                      
+                      // 清除之前的定时器
+                      if (volumeChangeTimeout) {
+                        clearTimeout(volumeChangeTimeout);
+                      }
+                      
+                      // 防抖处理：延迟保存设置，避免频繁保存
+                      volumeChangeTimeout = setTimeout(() => {
+                      updatePlayerSetting('volume', newVolume);
+                      updatePlayerSetting('muted', newMuted);
+                        volumeChangeTimeout = null;
+                      }, 300); // 300ms 防抖延迟，只用于保存设置
+                    };
+                    
+                    // 监听播放速度变化
+                    const onRateChange = () => {
+                      // 如果正在同步设置，忽略事件（避免循环）
+                      if (isSyncingSettingsRef.current) {
+                        return;
+                      }
+
+                      const newRate = videoElement.playbackRate;
+                      
+                      // 如果值没有变化，忽略（可能是我们刚刚设置的）
+                      if (Math.abs(currentPlaybackRateRef.current - newRate) < 0.01) {
+                        return;
+                      }
+                      
+                      console.log('检测到播放速度变化:', { rate: newRate, prevRate: currentPlaybackRateRef.current });
+                      
+                      // 更新 ref（先更新 ref，再更新 state，避免循环）
+                      currentPlaybackRateRef.current = newRate;
+                      
+                      // 立即更新 state，确保 UI 同步
+                      setPlaybackRate(newRate);
+                      
+                      // 延迟保存设置，避免频繁保存
+                      setTimeout(() => {
+                      updatePlayerSetting('playbackRate', newRate);
+                      }, 300);
+                    };
+                    
+                    videoElement.addEventListener('volumechange', onVolumeChange);
+                    videoElement.addEventListener('ratechange', onRateChange);
+                    
+                    // 保存事件监听器引用
+                    if (!videoElement._eventListeners) {
+                      videoElement._eventListeners = [];
+                    }
+                    videoElement._eventListeners.push(
+                      { type: 'volumechange', handler: onVolumeChange },
+                      { type: 'ratechange', handler: onRateChange }
+                    );
+                    
                     // 监听 playing 事件（视频开始播放）
                     const onPlaying = () => {
-                      console.log('视频开始播放，清除超时和错误状态');
-                      // 清除缓冲标志
+                      // 🎮 使用控制器处理 onPlaying 事件
+                      let videoElement = (() => {
+                try {
+                  return getVideoElement();
+                } catch (e) {
+                  return null;
+                }
+              })();
+                      if (!videoElement && playerRef.current?.wrapper) {
+                        videoElement = playerRef.current.wrapper.querySelector('video');
+                      }
+                      if (!videoElement) {
+                        console.log('onPlaying: 未找到 video 元素', {
+                          hasArtPlayerRef: !!playerRefInternal.current,
+                          hasWrapper: !!playerRefInternal.current?.wrapper,
+                          hasPlayerRef: !!playerRef.current?.wrapper
+                        });
+                        return;
+                      }
+                      
+                      // 检查视频元素是否可见
+                      const rect = videoElement.getBoundingClientRect();
+                      const computedStyle = window.getComputedStyle(videoElement);
+                      if (rect.width === 0 || rect.height === 0) {
+                        console.warn('⚠️ 视频元素尺寸为 0:', {
+                          width: rect.width,
+                          height: rect.height,
+                          display: computedStyle.display,
+                          visibility: computedStyle.visibility,
+                          opacity: computedStyle.opacity
+                        });
+                      }
+                      
+                      // 🔧 拖动保护期：在拖动期间或拖动刚结束后，忽略 onPlaying 事件
+                      const now = Date.now();
+                      const inSeeking = isSeekingRef.current || controller.state.isSeeking;
+                      const inProtectionPeriod = now < seekProtectionEndTimeRef.current;
+                      
+                      if (inSeeking || inProtectionPeriod) {
+                        console.log('🔧 onPlaying: 拖动中或保护期内，忽略此次播放事件', {
+                          isSeekingRef: isSeekingRef.current,
+                          controllerIsSeeking: controller.state.isSeeking,
+                          inProtectionPeriod,
+                          protectionEndTime: seekProtectionEndTimeRef.current ? new Date(seekProtectionEndTimeRef.current).toLocaleTimeString() : 'N/A'
+                        });
+                        return; // 🔧 直接返回，不处理任何逻辑
+                      }
+                      
+                      const shouldContinue = controller.handleOnPlaying(videoElement);
+                      
+                      if (!shouldContinue) {
+                        // 用户已暂停，不继续播放逻辑
+                        setIsPlaying(false);
+                        isPlayingRef.current = false;
+                        return;
+                      }
+                      
+                      // 正常播放逻辑：清除超时和错误状态
                       if (videoElement._isBuffering) {
                         videoElement._isBuffering = false;
-                        console.log('清除缓冲标志');
                       }
-                      // 清除超时和错误状态
                       if (videoLoadTimeoutRef.current) {
                         clearTimeout(videoLoadTimeoutRef.current);
                         videoLoadTimeoutRef.current = null;
                       }
                       setVideoLoadError(null);
                       setVideoLoadTimeout(false);
-                      // 确保播放状态正确
-                      if (!isPlaying) {
+                      
+                      // 更新播放状态
+                      if (!videoElement.paused) {
                         setIsPlaying(true);
                         isPlayingRef.current = true;
                       }
@@ -2910,26 +3996,142 @@ const VideoDetail = () => {
                     videoElement.addEventListener('playing', onPlaying);
                     
                     // 监听 waiting 事件（视频缓冲不足）
+                    // 优化：减少日志输出，避免频繁操作影响性能
+                    let waitingTimeout = null;
                     const onWaiting = () => {
-                      console.log('视频缓冲不足，等待数据加载...');
-                      // 不设置错误，只是记录日志
                       // 标记正在缓冲，避免 onPause 误判为用户手动暂停
                       videoElement._isBuffering = true;
                       // 保持播放状态，不要设置为 false
                       isPlayingRef.current = isPlaying || isPlayingRef.current;
+                      
+                      // 防抖处理：延迟日志输出，避免频繁触发
+                      if (waitingTimeout) {
+                        clearTimeout(waitingTimeout);
+                      }
+                      waitingTimeout = setTimeout(() => {
+                        console.log('视频缓冲不足，等待数据加载...');
+                        waitingTimeout = null;
+                      }, 500); // 500ms 防抖延迟
                     };
                     videoElement.addEventListener('waiting', onWaiting);
                     
                     // 监听 canplay 事件（缓冲完成，可以播放）
+                    // 优化：添加防抖处理，避免频繁的播放/暂停切换导致音频卡顿
+                    let canPlayTimeout = null;
                     const onCanPlayAfterWaiting = () => {
-                      console.log('缓冲完成，canplay 事件触发，_isBuffering:', videoElement._isBuffering, 'isPlayingRef:', isPlayingRef.current, 'paused:', videoElement.paused);
-                      // 如果之前是因为缓冲不足而暂停，且用户希望播放，则自动恢复播放
+                      // 如果用户手动暂停了，无论什么情况都不自动恢复播放（最优先检查）
+                      if (userPausedRef.current) {
+                        console.log('用户已手动暂停，不自动恢复播放（canplay）');
+                        // 清除 waiting 的防抖定时器
+                        if (waitingTimeout) {
+                          clearTimeout(waitingTimeout);
+                          waitingTimeout = null;
+                        }
+                        // 清除 canPlayTimeout（如果存在）
+                        if (canPlayTimeout) {
+                          clearTimeout(canPlayTimeout);
+                          canPlayTimeout = null;
+                        }
+                        // 清除缓冲标志，防止后续自动播放
                       if (videoElement._isBuffering) {
                         videoElement._isBuffering = false;
-                        // 如果视频应该播放但处于暂停状态，自动恢复播放
-                        if ((isPlayingRef.current || isPlaying) && videoElement.paused && document.contains(videoElement)) {
+                        }
+                        // 确保视频元素处于暂停状态
+                        if (!videoElement.paused) {
+                          videoElement.pause().catch(() => {});
+                        }
+                        return;
+                      }
+                      
+                      // 如果 isPlaying 状态为 false，说明用户希望暂停，不应该自动播放
+                      if (!isPlaying && !isPlayingRef.current) {
+                        console.log('isPlaying 为 false，不自动恢复播放（canplay）');
+                        // 清除 waiting 的防抖定时器
+                        if (waitingTimeout) {
+                          clearTimeout(waitingTimeout);
+                          waitingTimeout = null;
+                        }
+                        // 清除 canPlayTimeout（如果存在）
+                        if (canPlayTimeout) {
+                          clearTimeout(canPlayTimeout);
+                          canPlayTimeout = null;
+                        }
+                        // 清除缓冲标志
+                        if (videoElement._isBuffering) {
+                          videoElement._isBuffering = false;
+                        }
+                        // 确保视频元素处于暂停状态
+                        if (!videoElement.paused) {
+                          videoElement.pause().catch(() => {});
+                        }
+                        return;
+                      }
+                      
+                      // 清除 waiting 的防抖定时器
+                      if (waitingTimeout) {
+                        clearTimeout(waitingTimeout);
+                        waitingTimeout = null;
+                      }
+                      
+                      // 如果之前是因为缓冲不足而暂停，且用户希望播放，则自动恢复播放
+                      // 但是，如果用户已经手动暂停，绝对不应该自动恢复播放
+                      if (videoElement._isBuffering && !userPausedRef.current) {
+                        videoElement._isBuffering = false;
+                        
+                        // 防抖处理：延迟恢复播放，避免频繁切换导致音频卡顿
+                        if (canPlayTimeout) {
+                          clearTimeout(canPlayTimeout);
+                        }
+                        
+                        canPlayTimeout = setTimeout(() => {
+                          // 再次检查用户暂停状态（可能在延迟期间用户暂停了）
+                          // 这是最优先的检查：如果用户暂停了，无论什么状态都不应该自动播放
+                          if (userPausedRef.current) {
+                            console.log('用户已手动暂停，不自动恢复播放（延迟检查）');
+                            canPlayTimeout = null;
+                            return;
+                          }
+                          
+                          // 如果视频元素不在暂停状态，说明已经在播放，不需要自动播放
+                          if (!videoElement.paused) {
+                            console.log('视频已在播放，不需要自动恢复播放');
+                            canPlayTimeout = null;
+                            return;
+                          }
+                          
+                          // 如果 isPlaying 状态为 false，说明用户希望暂停，不应该自动播放
+                          if (!isPlaying && !isPlayingRef.current) {
+                            console.log('isPlaying 为 false，不自动恢复播放（延迟检查）');
+                            canPlayTimeout = null;
+                            return;
+                          }
+                          
+                          // 如果视频应该播放但处于暂停状态，且用户没有手动暂停，则自动恢复播放
+                          // 注意：必须同时检查 isPlayingRef.current 和 isPlaying，确保状态一致
+                          // 但是，如果用户已经手动暂停，则不自动播放（双重检查）
+                          const shouldPlay = (isPlayingRef.current || isPlaying) && 
+                                           videoElement.paused && 
+                                           document.contains(videoElement) &&
+                                           !userPausedRef.current;
+                          
+                          if (shouldPlay) {
+                            // 在执行 play() 之前，最后一次检查用户暂停状态
+                            if (userPausedRef.current || (!isPlaying && !isPlayingRef.current)) {
+                              console.log('执行 play() 前最后检查：用户已暂停，取消播放');
+                              canPlayTimeout = null;
+                              return;
+                            }
+                            
                           console.log('缓冲完成，自动恢复播放');
                           videoElement.play().then(() => {
+                              // 播放成功后，再次检查用户暂停状态
+                              if (userPausedRef.current) {
+                                console.log('播放成功后检测到用户已暂停，立即暂停');
+                                videoElement.pause().catch(() => {});
+                                setIsPlaying(false);
+                                isPlayingRef.current = false;
+                                return;
+                              }
                             console.log('缓冲完成后自动播放成功');
                             setIsPlaying(true);
                             isPlayingRef.current = true;
@@ -2938,6 +4140,37 @@ const VideoDetail = () => {
                               console.warn('缓冲完成后自动播放失败:', err);
                             }
                           });
+                          } else {
+                            console.log('不自动恢复播放:', {
+                              shouldPlay,
+                              isPlayingRef: isPlayingRef.current,
+                              isPlaying,
+                              paused: videoElement.paused,
+                              userPaused: userPausedRef.current
+                            });
+                          }
+                          canPlayTimeout = null;
+                        }, 200); // 200ms 防抖延迟，确保缓冲真正完成
+                      } else if (videoElement._isBuffering && userPausedRef.current) {
+                        // 如果用户已经手动暂停，清除缓冲标志，但不自动恢复播放
+                        console.log('用户已手动暂停，清除缓冲标志但不自动恢复播放');
+                        videoElement._isBuffering = false;
+                      } else if (!videoElement._isBuffering) {
+                        // 如果缓存加载完成（_isBuffering 为 false），但用户已手动暂停，确保视频不会自动播放
+                        if (userPausedRef.current || (!isPlaying && !isPlayingRef.current)) {
+                          console.log('缓存加载完成，但用户已手动暂停，不自动播放', {
+                            userPaused: userPausedRef.current,
+                            isPlaying,
+                            isPlayingRef: isPlayingRef.current,
+                            paused: videoElement.paused
+                          });
+                          // 确保视频元素处于暂停状态
+                          if (!videoElement.paused) {
+                            videoElement.pause().catch(() => {});
+                          }
+                          // 确保状态正确
+                          setIsPlaying(false);
+                          isPlayingRef.current = false;
                         }
                       }
                     };
@@ -3008,7 +4241,13 @@ const VideoDetail = () => {
               setTimeout(() => {
                 try {
                   // 检查视频元素是否存在且仍在 DOM 中
-                  const videoElement = reactPlayerRef.current?.getInternalPlayer?.('video') || 
+                  const videoElement = (() => {
+                try {
+                  return getVideoElement();
+                } catch (e) {
+                  return null;
+                }
+              })() || 
                                      (playerRef.current?.wrapper?.querySelector?.('video'));
                   
                   console.log('onReady: 检查视频元素状态', {
@@ -3167,7 +4406,7 @@ const VideoDetail = () => {
               }, 200); // 增加延迟时间，给视频元素更多初始化时间
             }}
             onError={(e) => {
-              console.error('ReactPlayer 播放出错:', e);
+              console.error('ArtPlayer 播放出错:', e);
               
               // 清除格式错误重试定时器
               if (formatErrorRetryTimerRef.current) {
@@ -3188,7 +4427,13 @@ const VideoDetail = () => {
               try {
                 // 尝试从事件目标（video 元素）获取错误
                 const videoElement = e?.target || e?.nativeEvent?.target || 
-                                   reactPlayerRef.current?.getInternalPlayer?.('video') || 
+                                   (() => {
+                try {
+                  return getVideoElement();
+                } catch (e) {
+                  return null;
+                }
+              })() || 
                                    (playerRef.current?.wrapper?.querySelector?.('video'));
                 
                 if (videoElement && videoElement.error) {
@@ -3213,7 +4458,13 @@ const VideoDetail = () => {
                     
                     // 延迟 2 秒后重新检查
                     formatErrorRetryTimerRef.current = setTimeout(() => {
-                      const currentVideoElement = reactPlayerRef.current?.getInternalPlayer?.('video') || 
+                      const currentVideoElement = (() => {
+                try {
+                  return getVideoElement();
+                } catch (e) {
+                  return null;
+                }
+              })() || 
                                                  (playerRef.current?.wrapper?.querySelector?.('video'));
                       
                       if (currentVideoElement) {
@@ -3229,11 +4480,13 @@ const VideoDetail = () => {
                           dispatch({ type: 'video/fetchPlayUrl/rejected', payload: { message: finalErrorMessage } });
                         } else {
                           console.log('延迟检查后错误已消失，视频可能已正常加载');
-                          // 错误已消失，尝试播放
-                          if (currentVideoElement.paused && !isSeekingRef.current && document.contains(currentVideoElement)) {
+                          // 错误已消失，尝试播放（但需要检查用户是否手动暂停）
+                          if (currentVideoElement.paused && !isSeekingRef.current && document.contains(currentVideoElement) && !userPausedRef.current) {
                             currentVideoElement.play().catch(err => {
                               console.warn('自动播放失败:', err);
                             });
+                          } else if (userPausedRef.current) {
+                            console.log('用户已手动暂停，不自动播放（错误恢复后）');
                           }
                         }
                       }
@@ -3295,8 +4548,50 @@ const VideoDetail = () => {
                 dispatch({ type: 'video/fetchPlayUrl/rejected', payload: { message: errorMessage } });
               }
             }}
-            onStart={() => {
-              console.log('ReactPlayer onStart 被调用，视频开始加载');
+            onPlay={() => {
+              // 🎮 使用控制器处理 onPlay 事件
+              const videoElement = getVideoElement();
+              
+              const shouldPlay = controller.handleOnPlay(videoElement);
+              
+              // 同步 controller 的状态到 VideoDetail 的 refs
+              userPausedRef.current = controller.state.userPaused;
+              
+              if (shouldPlay) {
+                setIsPlaying(true);
+                isPlayingRef.current = true;
+                
+                // 📋 添加视频到播放列表（Redux reducer 会自动同步到 localStorage）
+                if (videoInfo && id) {
+                  const videoType = mapVideoType(videoInfo.type || currentCategory);
+                  const isMovie = videoType === 'movies' || videoType === 'movie';
+                  const episodeNumber = isMovie ? null : (selectedEpisode?.episode || null);
+                  
+                  const playlistItem = {
+                    videoId: id,
+                    videoTitle: videoInfo.title || videoInfo.name || '未知视频',
+                    videoCover: videoInfo.cover_url || videoInfo.pic || '',
+                    videoType: videoType,
+                    episode: episodeNumber,
+                    timestamp: Date.now()
+                  };
+                  
+                  dispatch(addToPlaylist(playlistItem));
+                }
+              } else {
+                setIsPlaying(false);
+                isPlayingRef.current = false;
+              }
+            }}
+            onLoadedMetadata={() => {
+              console.log('ReactPlayer onLoadedMetadata 被调用，视频开始加载');
+              
+              // 如果正在拖动进度条，不要触发重新加载或播放
+              if (isSeekingRef.current) {
+                console.log('⚠️ 正在拖动进度条，跳过 onStart 中的重新加载逻辑');
+                return;
+              }
+              
               // 清除之前的超时定时器
               if (videoLoadTimeoutRef.current) {
                 clearTimeout(videoLoadTimeoutRef.current);
@@ -3352,7 +4647,13 @@ const VideoDetail = () => {
                 console.warn(`视频加载超时（${timeoutDuration / 1000}秒）`);
                 // 检查视频元素是否真的没有加载
                 try {
-                  const videoElement = reactPlayerRef.current?.getInternalPlayer?.('video') || 
+                  const videoElement = (() => {
+                try {
+                  return getVideoElement();
+                } catch (e) {
+                  return null;
+                }
+              })() || 
                                    (playerRef.current?.wrapper?.querySelector?.('video'));
                   if (videoElement) {
                     const currentTime = videoElement.currentTime || 0;
@@ -3399,17 +4700,31 @@ const VideoDetail = () => {
               if (isHLS) {
                 setTimeout(() => {
                   try {
-                    const videoElement = reactPlayerRef.current?.getInternalPlayer?.('video') || 
+                    const videoElement = (() => {
+                try {
+                  return getVideoElement();
+                } catch (e) {
+                  return null;
+                }
+              })() || 
                                        (playerRef.current?.wrapper?.querySelector?.('video'));
                     if (videoElement && !videoElement.hls && Hls.isSupported()) {
                       console.log('onStart: 检测到 HLS 视频但缺少实例，尝试创建...');
                       const hls = new Hls({
                         enableWorker: true,
-                        lowLatencyMode: true,
+                        lowLatencyMode: false, // 禁用低延迟模式，避免缓冲不足导致音频卡顿
                         backBufferLength: 90,
-                        maxBufferLength: 30,
-                        maxMaxBufferLength: 60,
+                        maxBufferLength: 600, // 增加最大缓冲长度到600秒，确保音频流畅
+                        maxMaxBufferLength: 600, // 增加最大缓冲长度上限到600秒
                         startLevel: -1,
+                        maxBufferSize: 600 * 1000 * 1000, // 最大缓冲大小 600MB（对应600秒视频）
+                        maxBufferHole: 0.5, // 允许的最大缓冲间隙（秒）
+                        highBufferWatchdogPeriod: 2, // 高缓冲监控周期（秒）
+                        nudgeOffset: 0.1, // 缓冲调整偏移量（秒）
+                        nudgeMaxRetry: 3, // 最大重试次数
+                        maxFragLoadingTimeOut: 20000, // 片段加载超时时间（毫秒）
+                        fragLoadingTimeOut: 20000, // 片段加载超时时间（毫秒）
+                        manifestLoadingTimeOut: 10000, // 清单加载超时时间（毫秒）
                         debug: false
                       });
                       
@@ -3478,73 +4793,97 @@ const VideoDetail = () => {
                   }
                 }, 500);
               }
-            }}
-            onDuration={(durationValue) => {
-              console.log('🔔 onDuration 回调被触发，durationValue:', durationValue);
-              // 确保 durationValue 是有效数字
-              if (durationValue != null && !isNaN(durationValue) && isFinite(durationValue) && durationValue > 0) {
-                const numDuration = Number(durationValue);
-                console.log('✅ 更新视频总时长:', numDuration, '秒');
-                setDuration(numDuration);
-              } else {
-                console.warn('⚠️ onDuration 收到无效值:', durationValue, {
-                  type: typeof durationValue,
-                  isNaN: isNaN(durationValue),
-                  isFinite: isFinite(durationValue),
-                  value: durationValue
-                });
-                // 如果 durationValue 无效，尝试从视频元素获取
-                setTimeout(() => {
-                  try {
-                    const videoElement = reactPlayerRef.current?.getInternalPlayer?.('video') || 
-                                       (playerRef.current?.wrapper?.querySelector?.('video'));
-                    if (videoElement && videoElement.duration && 
-                        !isNaN(videoElement.duration) && isFinite(videoElement.duration) && 
-                        videoElement.duration > 0) {
-                      const elementDuration = Number(videoElement.duration);
-                      console.log('✅ 从视频元素获取到时长:', elementDuration, '秒');
-                      setDuration(elementDuration);
+
+              // 额外读取一次视频时长，避免部分源在初始化阶段 duration 未同步到 state
+              setTimeout(() => {
+                try {
+                  const videoElement = (() => {
+                    try {
+                      return getVideoElement();
+                    } catch (e) {
+                      return null;
                     }
-                  } catch (err) {
-                    console.error('从视频元素获取时长失败:', err);
+                  })() ||
+                    (playerRef.current?.wrapper?.querySelector?.('video'));
+                  if (
+                    videoElement &&
+                    videoElement.duration &&
+                    !isNaN(videoElement.duration) &&
+                    isFinite(videoElement.duration) &&
+                    videoElement.duration > 0
+                  ) {
+                    const elementDuration = Number(videoElement.duration);
+                    console.log('✅ 从视频元素获取到时长:', elementDuration, '秒');
+                    setDuration(elementDuration);
                   }
-                }, 500);
-              }
+                } catch (err) {
+                  console.error('从视频元素获取时长失败:', err);
+                }
+              }, 500);
             }}
             onProgress={handleProgress}
             onEnded={handleEnded}
             onPause={() => {
               // 检查是否是因为缓冲不足导致的暂停
-              const videoElement = reactPlayerRef.current?.getInternalPlayer?.('video') || 
-                                 (reactPlayerRef.current?.wrapper?.querySelector?.('video'));
+              const videoElement = (() => {
+                try {
+                  return getVideoElement();
+                } catch (e) {
+                  return null;
+                }
+              })() || 
+                                 (playerRef.current?.wrapper?.querySelector?.('video'));
               const isBuffering = videoElement?._isBuffering || false;
               
-              console.log('onPause 事件触发:', {
-                isBuffering,
-                isSeeking: isSeekingRef.current,
-                paused: videoElement?.paused,
-                readyState: videoElement?.readyState
-              });
-              
-              // 如果不是因为缓冲不足导致的暂停，且不是正在拖动进度条，才更新播放状态
-              // 但是，如果视频元素处于缓冲状态（readyState < 3），不要更新播放状态
-              if (!isSeekingRef.current && !isBuffering && videoElement && videoElement.readyState >= 3) {
-                setIsPlaying(false);
-                isPlayingRef.current = false;
-              } else if (isBuffering) {
-                // 如果是缓冲导致的暂停，保持播放状态，等待缓冲完成后恢复
-                console.log('缓冲导致的暂停，保持播放状态');
-                isPlayingRef.current = true; // 保持期望的播放状态
+              // 🚨 关键修复：播放器未准备好时，忽略 onPause 事件
+              // 因为视频加载初期的 pause 事件不是用户主动触发的
+              if (!playerReady || !controller.state.playerReady) {
+                return;
               }
               
-              if (videoInfo && reactPlayerRef.current && !isSeekingRef.current && !isBuffering) {
+              // 🎮 使用控制器处理 onPause 事件
+              // 只有在播放器准备好之后的 pause 事件才视为用户暂停
+              // 🔧 关键修复：拖动过程中或拖动保护期内，完全忽略 onPause 事件
+              const now = Date.now();
+              const inSeeking = isSeekingRef.current || controller.state.isSeeking;
+              const inProtectionPeriod = now < seekProtectionEndTimeRef.current;
+              
+              if (inSeeking || inProtectionPeriod) {
+                console.log('🔧 onPause: 拖动中或保护期内，忽略此次暂停事件', {
+                  isSeekingRef: isSeekingRef.current,
+                  controllerIsSeeking: controller.state.isSeeking,
+                  inProtectionPeriod,
+                  protectionEndTime: seekProtectionEndTimeRef.current ? new Date(seekProtectionEndTimeRef.current).toLocaleTimeString() : 'N/A'
+                });
+                return; // 🔧 直接返回，不处理任何逻辑
+              }
+
+              // 视频自然结束会先触发 pause，再触发 ended；这里不能标记为“用户暂停”
+              if (videoElement?.ended) {
+                return;
+              }
+              
+              // 正常处理暂停事件
+              controller.state.userPaused = true;
+              controller.state.isPlaying = false;
+              userPausedRef.current = true; // 同步旧的 ref
+              setIsPlaying(false);
+              isPlayingRef.current = false;
+              
+              // 如果 videoElement 存在，执行完整的暂停逻辑
+              if (videoElement) {
+                controller.handleOnPause(videoElement, isSeekingRef.current);
+              }
+              
+              // 保存播放进度
+              if (videoInfo && playerRefInternal.current && !isSeekingRef.current && !isBuffering) {
                 const videoType = mapVideoType(videoInfo.type || currentCategory);
                 
-                // 获取当前播放时间：优先从 ReactPlayer，其次从 state，最后从视频元素
+                // 获取当前播放时间：优先从 ArtPlayer，其次从 state，最后从视频元素
                 let currentTime = 0;
                 try {
-                  if (reactPlayerRef.current.getCurrentTime) {
-                    currentTime = reactPlayerRef.current.getCurrentTime() || 0;
+                  if (playerRefInternal.current?.getCurrentTime) {
+                    currentTime = playerRefInternal.current.getCurrentTime() || 0;
                   }
                 } catch (err) {
                   console.warn('从 ReactPlayer 获取当前时间失败:', err);
@@ -3558,8 +4897,14 @@ const VideoDetail = () => {
                 // 如果还是 0，尝试从视频元素获取
                 if (!currentTime || currentTime === 0) {
                   try {
-                    const videoElement = reactPlayerRef.current.getInternalPlayer?.('video') || 
-                                       (reactPlayerRef.current.wrapper?.querySelector?.('video'));
+                    const videoElement = (() => {
+                try {
+                  return getVideoElement();
+                } catch (e) {
+                  return null;
+                }
+              })() || 
+                                       (playerRefInternal.current.wrapper?.querySelector?.('video'));
                     if (videoElement && videoElement.currentTime && 
                         !isNaN(videoElement.currentTime) && isFinite(videoElement.currentTime)) {
                       currentTime = Number(videoElement.currentTime);
@@ -3569,26 +4914,32 @@ const VideoDetail = () => {
                   }
                 }
                 
-                // 获取视频总时长：优先从 state，其次从 ReactPlayer，最后从视频元素
+                // 获取视频总时长：优先从 state，其次从 ArtPlayer，最后从视频元素
                 let totalDuration = duration || 0;
                 
                 if (!totalDuration || totalDuration === 0) {
                   try {
-                    if (reactPlayerRef.current.getDuration) {
-                      const refDuration = reactPlayerRef.current.getDuration();
+                    if (playerRefInternal.current.getDuration) {
+                      const refDuration = playerRefInternal.current.getDuration();
                       if (refDuration && refDuration > 0 && !isNaN(refDuration) && isFinite(refDuration)) {
                         totalDuration = Number(refDuration);
                       }
                     }
                   } catch (err) {
-                    console.warn('从 ReactPlayer 获取时长失败:', err);
+                    console.warn('从 ArtPlayer 获取时长失败:', err);
                   }
                 }
                 
                 if (!totalDuration || totalDuration === 0) {
                   try {
-                    const videoElement = reactPlayerRef.current.getInternalPlayer?.('video') || 
-                                       (reactPlayerRef.current.wrapper?.querySelector?.('video'));
+                    const videoElement = (() => {
+                try {
+                  return getVideoElement();
+                } catch (e) {
+                  return null;
+                }
+              })() || 
+                                       (playerRefInternal.current.wrapper?.querySelector?.('video'));
                     if (videoElement && videoElement.duration && 
                         !isNaN(videoElement.duration) && isFinite(videoElement.duration) && 
                         videoElement.duration > 0) {
@@ -3613,7 +4964,7 @@ const VideoDetail = () => {
                   totalDuration,
                   playedSeconds,
                   duration,
-                  hasReactPlayer: !!reactPlayerRef.current
+                  hasArtPlayer: !!playerRefInternal.current
                 });
                 
                 if (currentTime > 0) {
@@ -3630,6 +4981,7 @@ const VideoDetail = () => {
               }
             }}
           />
+        </div>
         </div>
       </div>
     );
@@ -3659,46 +5011,88 @@ const VideoDetail = () => {
     
     // 如果没有推荐数据，不显示（避免显示空内容）
     if (!recommendations || recommendations.length === 0) {
-      console.warn('为你推荐 - 没有推荐数据，episodes:', episodes);
+      // 移除重复日志，避免控制台噪音
       return null;
     }
     
+    const scrollRelatedVideos = (direction = 1) => {
+      const grid = relatedVideosGridRef.current;
+      if (!grid) return;
+      const distance = Math.max(280, Math.floor(grid.clientWidth * 0.8));
+      grid.scrollBy({ left: direction * distance, behavior: 'smooth' });
+      setTimeout(updateRelatedScrollState, 260);
+    };
+
+    const handleRelatedVideosWheel = (event) => {
+      const grid = relatedVideosGridRef.current;
+      if (!grid) return;
+      if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
+      event.preventDefault();
+      grid.scrollBy({ left: event.deltaY, behavior: 'auto' });
+      updateRelatedScrollState();
+    };
+
     return (
       <div className="related-videos-section">
         <h2>为你推荐</h2>
-        <div className="related-videos-grid">
-          {recommendations.map(video => (
-            <div key={video.id} className="related-video-card">
-              <div 
-                className="related-video-link" 
-                onClick={(e) => handleRelatedVideoClick(e, video)}
-                style={{ cursor: 'pointer' }}
-              >
-              <div className="related-video-thumb">
-                  <VideoImage 
-                    src={video.cover_url || video.pic || video.vod_pic || video.vod_cover || video.img || video.cover || video.thumb} 
-                    alt={video.title} 
-                  />
-                  {(video.is_update === 1 || video.is_update === true || video.is_new === 1 || video.is_new === true) && <span className="new-badge">新</span>}
-                  {(video.score || video.rating) && (
-                    <div className="video-rating-overlay">
-                      <StarRating score={parseFloat(video.score || video.rating || 0)} />
+        <div className="related-videos-carousel">
+          <button
+            type="button"
+            className={`related-videos-nav-btn related-videos-nav-btn-left ${canScrollRelatedLeft ? '' : 'is-hidden'}`}
+            onClick={() => scrollRelatedVideos(-1)}
+            aria-label="向左查看推荐"
+            disabled={!canScrollRelatedLeft}
+          >
+            ‹
+          </button>
+          <div
+            className="related-videos-grid"
+            ref={relatedVideosGridRef}
+            onWheel={handleRelatedVideosWheel}
+            onScroll={updateRelatedScrollState}
+          >
+            {recommendations.map(video => (
+              <div key={video.id} className="related-video-card">
+                <div
+                  className="related-video-link"
+                  onClick={(e) => handleRelatedVideoClick(e, video)}
+                  style={{ cursor: 'pointer' }}
+                >
+                  <div className="related-video-thumb">
+                    <VideoImage
+                      src={video.cover_url || video.pic || video.vod_pic || video.vod_cover || video.img || video.cover || video.thumb}
+                      alt={video.title}
+                    />
+                    {(video.is_update === 1 || video.is_update === true || video.is_new === 1 || video.is_new === true) && <span className="new-badge">新</span>}
+                    {(video.score || video.rating) && (
+                      <div className="video-rating-overlay">
+                        <StarRating score={parseFloat(video.score || video.rating || 0)} />
+                      </div>
+                    )}
+                  </div>
+                  <div className="related-video-info">
+                    <h3 className="related-video-title">{video.title}</h3>
+                    <div className="related-video-meta">
+                      {video.release_date && (
+                        <div className="video-release-date">
+                          <span className="meta-label">首映:</span> <span className="meta-value">{video.release_date}</span>
+                        </div>
+                      )}
                     </div>
-            )}
-          </div>
-              <div className="related-video-info">
-                <h3 className="related-video-title">{video.title}</h3>
-                <div className="related-video-meta">
-                  {video.release_date && (
-                    <div className="video-release-date">
-                      <span className="meta-label">首映:</span> <span className="meta-value">{video.release_date}</span>
-          </div>
-                  )}
-          </div>
-          </div>
+                  </div>
+                </div>
               </div>
-            </div>
-          ))}
+            ))}
+          </div>
+          <button
+            type="button"
+            className={`related-videos-nav-btn related-videos-nav-btn-right ${canScrollRelatedRight ? '' : 'is-hidden'}`}
+            onClick={() => scrollRelatedVideos(1)}
+            aria-label="向右查看推荐"
+            disabled={!canScrollRelatedRight}
+          >
+            ›
+          </button>
         </div>
       </div>
     );

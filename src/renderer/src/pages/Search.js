@@ -5,6 +5,7 @@ import { useSelector, useDispatch } from 'react-redux';
 import { searchVideoList, clearSearchResults } from '../store/videoSlice';
 import VideoImage from '../components/VideoImage';
 import StarRating from '../components/StarRating';
+import PlatformIcon from '../components/PlatformIcon';
 import './SearchPage.css';
 
 const SEARCH_HISTORY_KEY = 'wtv_search_history';
@@ -333,7 +334,7 @@ const Search = () => {
       {/* 顶部搜索栏 */}
       <div className="search-bar">
         <form onSubmit={handleSearch} className="search-bar-form">
-          <span className="search-icon">🔍</span>
+          <PlatformIcon className="search-icon" iconName="search" fallback="🔍" />
               <input
                 type="text"
                 value={keyword}
