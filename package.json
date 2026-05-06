@@ -6,7 +6,7 @@
   ],
   "version": "1.0.2",
   "versionCode": 102,
-  "buildDate": "20260428",
+  "buildDate": "20260506",
   "description": "看视频 - WTV Desktop Application",
   "main": "src/main/main.js",
   "scripts": {
@@ -23,6 +23,7 @@
     "build:all": "node build-all.js",
     "build:mac": "node build-all.js --mac-only",
     "build:win": "node build-all.js --win-only",
+    "build:ubuntu": "node build-all.js --ubuntu-only",
     "build:react": "npm run build -w src/renderer",
     "build:icon": "node build/convert-icon.js"
   },
@@ -48,7 +49,7 @@
     "productName": "WTV",
     "afterPack": "build/fix-mac-helper-visibility.js",
     "directories": {
-      "output": "dist/mac"
+      "output": "dist/mac/arm64"
     },
     "icon": "build/icons/icon.png",
     "files": [
@@ -61,7 +62,6 @@
         {
           "target": "dmg",
           "arch": [
-            "x64",
             "arm64"
           ]
         }
@@ -81,6 +81,18 @@
         }
       ],
       "icon": "build/icons/icon.ico"
+    },
+    "linux": {
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "category": "public.app-category.entertainment"
     },
     "nsis": {
       "oneClick": false,

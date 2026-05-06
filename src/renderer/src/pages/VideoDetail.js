@@ -45,7 +45,11 @@ const VideoDetail = () => {
   const dispatch = useDispatch();
   const searchParams = new URLSearchParams(location.search);
   const isNewWindow = searchParams.get('newWindow') === 'true';
-  const isPlayerWindow = searchParams.get('playerWindow') === 'true';
+  // Electron 播放窗口历史上使用过两种参数：
+  // - newWindow=true（当前主路径）
+  // - playerWindow=true（兼容旧逻辑）
+  // 统一按“任一命中即为播放器窗口”处理，避免在播放窗口内再次 openPlayerWindow 导致多开。
+  const isPlayerWindow = isNewWindow || searchParams.get('playerWindow') === 'true';
   
   // 🎮 初始化播放控制器（使用 useRef 确保实例稳定）
   const playbackControllerRef = useRef(null);

@@ -98,7 +98,8 @@ WTV-DeskTop/
 │   └── logo.svg             # 应用图标
 ├── dist/                     # 打包输出目录（构建产物，不提交）
 │   ├── mac/                 # Mac 平台打包文件（build:all / build:mac）
-│   └── windows/             # Windows 平台打包文件（build:all / build:win）
+│   ├── windows/             # Windows 平台打包文件（build:all / build:win）
+│   └── ubuntu/              # Ubuntu 平台打包文件（build:all / build:ubuntu）
 ├── build-all.js             # 一键打包脚本
 ├── package.json             # 项目配置文件
 └── README.md               # 项目文档
@@ -173,9 +174,10 @@ npm run pack           # 打包但不生成安装包（仅目录）
 npm run dist           # 生成分发包
 
 # 打包相关（推荐使用）
-npm run build:all      # 一键打包所有平台（Mac + Windows）
+npm run build:all      # 一键打包所有平台（Mac + Windows + Ubuntu）
 npm run build:mac      # 只打包 Mac 平台
 npm run build:win      # 只打包 Windows 平台
+npm run build:ubuntu  # 只打包 Ubuntu 平台
 ```
 
 ### 代码结构说明
@@ -205,15 +207,15 @@ npm run build:win      # 只打包 Windows 平台
 项目提供了便捷的一键打包脚本，支持自动清理缓存和分别输出到不同目录：
 
 ```bash
-# 打包所有平台（Mac + Windows）
+# 打包所有平台（Mac + Windows + Ubuntu）
 npm run build:all
 ```
 
 打包过程会：
 1. ✅ 自动清理上次的构建缓存（dist、React build、node_modules/.cache 等）
 2. ✅ 自动构建 React 应用
-3. ✅ 分别打包 Mac 和 Windows 平台
-4. ✅ 输出文件分别放到 `dist/mac/` 和 `dist/windows/` 目录
+3. ✅ 分别打包 Mac / Windows / Ubuntu 平台
+4. ✅ 输出文件分别放到 `dist/mac/`、`dist/windows/` 和 `dist/ubuntu/` 目录
 
 ### 单独打包
 
@@ -223,22 +225,25 @@ npm run build:mac
 
 # 只打包 Windows 平台（x64）
 npm run build:win
+
+# 只打包 Ubuntu 平台（x64）
+npm run build:ubuntu
 ```
 
 ### 打包输出
 
-打包完成后，文件会按平台分别存放（使用 `build:all` / `build:mac` / `build:win`）：
+打包完成后，文件会按平台分别存放（使用 `build:all` / `build:mac` / `build:win` / `build:ubuntu`）：
 
 ```
 dist/
 ├── mac/                    # Mac 平台输出
-│   ├── WTV-1.0.0.dmg      # Intel Mac 安装包
-│   ├── WTV-1.0.0-arm64.dmg # Apple Silicon Mac 安装包
-│   └── mac/                # Mac 应用目录
-│   └── mac-arm64/          # Apple Silicon Mac 应用目录
+│   ├── x64/                # Intel Mac 安装包/应用目录
+│   └── arm64/              # Apple Silicon Mac 安装包/应用目录
 └── windows/                # Windows 平台输出
     ├── WTV Setup 1.0.0.exe # Windows 安装程序
     └── win-unpacked/       # 未打包的应用目录
+└── ubuntu/                 # Ubuntu 平台输出
+    └── x64/                # AppImage 安装包/应用目录
 ```
 
 ### 打包配置
@@ -267,6 +272,9 @@ node build-all.js --mac-only
 
 # 只打包 Windows
 node build-all.js --win-only
+
+# 只打包 Ubuntu
+node build-all.js --ubuntu-only
 ```
 
 ## 🌐 API 配置
