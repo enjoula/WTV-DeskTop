@@ -218,8 +218,19 @@ const PlayHistory = () => {
                     duration: item.duration
                   };
                   
-                  if (window.electronAPI && window.electronAPI.openVideoWindow) {
-                    // 通过 Electron API 打开时，playHistory 信息已包含在 videoData 中
+                  if (window.electronAPI && window.electronAPI.openPlayerWindow) {
+                    // 直接进入播放窗口续播（详情页由其它入口打开）；playHistory 随 videoData 经 getVideoData 交给 VideoDetail
+                    const episodeArg =
+                      item.episode !== undefined && item.episode !== null && item.episode !== ''
+                        ? item.episode
+                        : null;
+                    window.electronAPI
+                      .openPlayerWindow(item.videoId, videoData, episodeArg)
+                      .catch((err) => {
+                        console.error('从播放记录打开播放窗口失败:', err);
+                        showTip('打开播放失败');
+                      });
+                  } else if (window.electronAPI && window.electronAPI.openVideoWindow) {
                     window.electronAPI.openVideoWindow(item.videoId, videoData);
                   } else {
                     // 降级处理：如果没有 Electron API，使用 navigate（开发环境可能用到）

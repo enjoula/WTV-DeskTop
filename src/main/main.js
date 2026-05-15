@@ -1027,16 +1027,32 @@ ipcMain.handle('open-video-window', (event, videoId, videoData) => {
 ipcMain.handle('open-player-window', (event, videoId, videoData, episodeNumber) => {
   const isDevelopment = !app.isPackaged && process.env.NODE_ENV !== 'production';
   const finalEpisodeNumber = episodeNumber || videoData?.autoPlayEpisode || '';
+  /** 从播放记录续播：由渲染进程读取 playHistory 做带进度续播，勿在 URL 上加 autoplayEpisode（否则会先无进度连播，与续播逻辑冲突） */
+  const resumeFromPlayHistory = !!(videoData && videoData.playHistory);
   const queryParts = ['newWindow=true', 'playerWindow=true', 'autoplay=true'];
-  if (finalEpisodeNumber !== '' && finalEpisodeNumber !== null && finalEpisodeNumber !== undefined) {
+  if (resumeFromPlayHistory) {
+    queryParts.push('fromPlayHistory=true');
+  }
+  if (
+    !resumeFromPlayHistory &&
+    finalEpisodeNumber !== '' &&
+    finalEpisodeNumber !== null &&
+    finalEpisodeNumber !== undefined
+  ) {
     queryParts.push(`autoplayEpisode=${encodeURIComponent(finalEpisodeNumber)}`);
   }
   const query = queryParts.join('&');
 
+  const storedAutoPlayEpisode = resumeFromPlayHistory
+    ? (videoData.playHistory.episode != null && videoData.playHistory.episode !== ''
+        ? videoData.playHistory.episode
+        : null)
+    : (finalEpisodeNumber || null);
+
   if (playerWindow && !playerWindow.isDestroyed()) {
     currentPlayerVideoData = {
       ...(videoData || {}),
-      autoPlayEpisode: finalEpisodeNumber || null,
+      autoPlayEpisode: storedAutoPlayEpisode,
     };
 
     const newTitle = videoData?.title ? `${videoData.title} - 播放` : '视频播放';
@@ -1060,7 +1076,7 @@ ipcMain.handle('open-player-window', (event, videoId, videoData, episodeNumber) 
 
   currentPlayerVideoData = {
     ...(videoData || {}),
-    autoPlayEpisode: finalEpisodeNumber || null,
+    autoPlayEpisode: storedAutoPlayEpisode,
   };
 
   const initialTitle = videoData?.title ? `${videoData.title} - 播放` : '视频播放';

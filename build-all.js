@@ -141,11 +141,17 @@ function build(platform) {
     try {
       log(`  执行命令: ${command}`, 'blue');
 
+      // app-builder 默认从 github.com 拉 Electron zip，国内/不稳定时易出现 504；未显式设置时默认走 npmmirror
+      const electronMirror =
+        process.env.ELECTRON_MIRROR ||
+        process.env.npm_config_electron_mirror ||
+        'https://npmmirror.com/mirrors/electron/';
       execSync(command, {
         stdio: 'inherit',
         cwd: process.cwd(),
         env: {
           ...process.env,
+          ELECTRON_MIRROR: electronMirror,
         },
       });
 
@@ -272,6 +278,18 @@ function writeBuildDate() {
   }
 }
 
+function logElectronDownloadHints() {
+  log('\n📡 Electron 二进制下载失败常见原因：访问 github.com 不稳定（EOF / timeout）', 'yellow');
+  log('   可任选其一后重新执行打包：', 'yellow');
+  log('   1) 临时使用国内镜像（zsh/bash）：', 'blue');
+  log('      export ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/', 'bright');
+  log('      npm run build:all', 'bright');
+  log('   2) 或在项目根目录 .npmrc 增加一行（持久）：', 'blue');
+  log('      electron_mirror=https://npmmirror.com/mirrors/electron/', 'bright');
+  log('   3) 使用系统/终端代理后再打包；或稍后网络稳定时重试。', 'blue');
+  log('   缓存目录一般为 ~/.cache/electron/（可保留已下完的 zip 避免重复拉取）。\n', 'blue');
+}
+
 // 主函数
 function main() {
   log('🚀 开始一键打包所有平台...', 'bright');
@@ -339,6 +357,7 @@ function main() {
     if (failedPlatforms.length > 0) {
       log(`\n❌ 打包失败的平台: ${failedPlatforms.join(', ')}`, 'red');
       log('提示: 某些平台可能需要在对应的操作系统上打包，或需要配置交叉编译环境', 'yellow');
+      logElectronDownloadHints();
     }
     
     log('\n📁 输出目录:', 'bright');

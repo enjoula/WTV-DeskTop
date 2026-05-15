@@ -6,7 +6,7 @@
   ],
   "version": "1.0.2",
   "versionCode": 102,
-  "buildDate": "20260506",
+  "buildDate": "20260515",
   "description": "看视频 - WTV Desktop Application",
   "main": "src/main/main.js",
   "scripts": {
@@ -47,9 +47,12 @@
   "build": {
     "appId": "com.wtv.app",
     "productName": "WTV",
+    "electronDownload": {
+      "mirror": "https://npmmirror.com/mirrors/electron/"
+    },
     "afterPack": "build/fix-mac-helper-visibility.js",
     "directories": {
-      "output": "dist/mac/arm64"
+      "output": "dist/mac/x64"
     },
     "icon": "build/icons/icon.png",
     "files": [
@@ -62,7 +65,7 @@
         {
           "target": "dmg",
           "arch": [
-            "arm64"
+            "x64"
           ]
         }
       ],

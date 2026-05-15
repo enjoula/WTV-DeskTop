@@ -29,9 +29,10 @@ const PlaybackTestPage = () => {
 
       console.log('Testing playback with params:', params);
       
-      // Dispatch the action and wait for the result
-      const result = await dispatch(fetchPlayUrl(params)).unwrap();
-      
+      // unwrap 为接口 response.data；若有嵌套 data 字段则取内层，否则用整包
+      const wrapped = await dispatch(fetchPlayUrl(params)).unwrap();
+      const result = wrapped?.data ?? wrapped;
+
       console.log('Playback test result:', result);
       setTestResult({
         success: true,

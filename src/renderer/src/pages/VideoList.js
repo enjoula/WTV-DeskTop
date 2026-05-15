@@ -416,6 +416,24 @@ const VideoList = () => {
       }
     }
   };
+
+  const handleFilterChangeRef = useRef(handleFilterChange);
+  handleFilterChangeRef.current = handleFilterChange;
+
+  // 顶部导航：在当前列表页再次点击同一分类标题时，回到第一页并重新请求
+  useEffect(() => {
+    const onListReset = (e) => {
+      if (e.detail?.category !== category) return;
+      sessionStorage.setItem(scrollStorageKey(category), '0');
+      sessionStorage.setItem(pageStorageKey(category), '1');
+      window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+      restoredCategoryRef.current = category;
+      loadingRef.current = false;
+      handleFilterChangeRef.current(activeFilters);
+    };
+    window.addEventListener('wtv:video-list-reset', onListReset);
+    return () => window.removeEventListener('wtv:video-list-reset', onListReset);
+  }, [category, activeFilters, scrollStorageKey, pageStorageKey]);
   
   // 切换分类时重置筛选条件
   useEffect(() => {
@@ -424,15 +442,12 @@ const VideoList = () => {
   
   return (
     <div className="video-list-page">
-      <div className="page-header">
+      <div className="filter-section">
+        <FilterPanel 
+          type={category} 
+          onFilterChange={handleFilterChange}
+        />
       </div>
-      
-        <div className="filter-section">
-          <FilterPanel 
-            type={category} 
-            onFilterChange={handleFilterChange}
-          />
-        </div>
       
       {categoryData.error && <div className="error-message">{categoryData.error}</div>}
       

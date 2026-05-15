@@ -389,6 +389,13 @@ const MyArtPlayer = forwardRef(({
       customType: isHLS ? {
         m3u8: function (video, src) {
           if (HlsClass.isSupported && HlsClass.isSupported()) {
+            let fatalNetRetries = 0;
+            let fatalMediaRetries = 0;
+            const resetFatalCounters = () => {
+              fatalNetRetries = 0;
+              fatalMediaRetries = 0;
+            };
+
             const hls = new HlsClass({
               // ─── 核心：根据 blockAdEnabled 决定是否使用过滤 Loader（与 LunaTV 完全一致）
               loader: blockAdEnabledRef.current
@@ -400,15 +407,16 @@ const MyArtPlayer = forwardRef(({
               maxBufferLength: 600,
               maxMaxBufferLength: 600,
               maxBufferSize: 600 * 1000 * 1000,
-              maxBufferHole: 1.0,
+              // 略放宽：减少 CDN 抖动时被误判为「洞」导致中途停住
+              maxBufferHole: 1.5,
               highBufferWatchdogPeriod: 2,
               nudgeOffset: 0.1,
-              nudgeMaxRetry: 3,
-              maxFragLoadingTimeOut: 20000,
-              fragLoadingTimeOut: 20000,
-              manifestLoadingTimeOut: 10000,
-              levelLoadingTimeOut: 10000,
-              maxStarvationDelay: 4,
+              nudgeMaxRetry: 5,
+              maxFragLoadingTimeOut: 30000,
+              fragLoadingTimeOut: 30000,
+              manifestLoadingTimeOut: 20000,
+              levelLoadingTimeOut: 20000,
+              maxStarvationDelay: 8,
               abrEwmaDefaultEstimate: 500000,
               abrBandWidthFactor: 0.95,
               abrBandWidthUpFactor: 0.7,
@@ -421,25 +429,121 @@ const MyArtPlayer = forwardRef(({
             // 将 hls 实例挂到 video 元素上，兼容 VideoDetail.js 中的检测逻辑
             video.hls = hls;
 
-            hls.on(HlsClass.Events.ERROR, function (event, data) {
-              if (data.fatal) {
-                switch (data.type) {
-                  case HlsClass.ErrorTypes.NETWORK_ERROR:
-                    hls.startLoad();
-                    break;
-                  case HlsClass.ErrorTypes.MEDIA_ERROR:
-                    hls.recoverMediaError();
-                    break;
-                  default:
-                    if (onErrorRef.current) onErrorRef.current(new Error(`HLS 错误: ${data.type}`));
-                    hls.destroy();
+            hls.on(HlsClass.Events.FRAG_LOADED, resetFatalCounters);
+
+            hls.on(HlsClass.Events.ERROR, function (_event, data) {
+              if (!data) return;
+              const ED = HlsClass.ErrorDetails;
+
+              // 非致命错误：常见于中途 buffer stalled、分片超时，单次 startLoad 常能续播
+              if (!data.fatal) {
+                if (ED) {
+                  const d = data.details;
+                  if (
+                    d === ED.BUFFER_STALLED_ERROR ||
+                    d === ED.BUFFER_SEEK_OVER_HOLE ||
+                    d === ED.FRAG_LOAD_ERROR ||
+                    d === ED.FRAG_LOAD_TIMEOUT ||
+                    d === ED.LEVEL_LOAD_ERROR
+                  ) {
+                    try {
+                      console.warn('WTV HLS non-fatal → startLoad', d);
+                      hls.startLoad();
+                    } catch (_) { /* ignore */ }
+                  }
                 }
+                return;
+              }
+
+              switch (data.type) {
+                case HlsClass.ErrorTypes.NETWORK_ERROR:
+                  fatalNetRetries += 1;
+                  if (fatalNetRetries <= 3) {
+                    console.warn('WTV HLS fatal network → startLoad', fatalNetRetries, data.details);
+                    try {
+                      hls.startLoad();
+                    } catch (_) { /* ignore */ }
+                  } else if (fatalNetRetries <= 5) {
+                    console.warn('WTV HLS fatal network → reloadSource', fatalNetRetries);
+                    try {
+                      hls.loadSource(src);
+                      hls.startLoad();
+                    } catch (_) { /* ignore */ }
+                  } else {
+                    console.error('WTV HLS fatal network, give up', data.details);
+                    resetFatalCounters();
+                    if (onErrorRef.current) {
+                      onErrorRef.current(new Error(`HLS 网络错误: ${data.details || ''}`));
+                    }
+                    try {
+                      hls.destroy();
+                    } catch (_) { /* ignore */ }
+                  }
+                  break;
+                case HlsClass.ErrorTypes.MEDIA_ERROR:
+                  fatalMediaRetries += 1;
+                  if (fatalMediaRetries <= 3) {
+                    console.warn('WTV HLS fatal media → recoverMediaError', fatalMediaRetries);
+                    try {
+                      hls.recoverMediaError();
+                    } catch (_) { /* ignore */ }
+                  } else {
+                    console.error('WTV HLS fatal media, give up', data.details);
+                    resetFatalCounters();
+                    if (onErrorRef.current) {
+                      onErrorRef.current(new Error(`HLS 解码错误: ${data.details || ''}`));
+                    }
+                    try {
+                      hls.destroy();
+                    } catch (_) { /* ignore */ }
+                  }
+                  break;
+                default:
+                  if (onErrorRef.current) {
+                    onErrorRef.current(new Error(`HLS 错误: ${data.type} ${data.details || ''}`));
+                  }
+                  try {
+                    hls.destroy();
+                  } catch (_) { /* ignore */ }
               }
             });
 
             hls.on(HlsClass.Events.MANIFEST_PARSED, function () {
+              resetFatalCounters();
               if (onLoadedMetadataRef.current) onLoadedMetadataRef.current();
             });
+
+            // 播放中途缓冲跟不上：<video> stalled / 长时间 waiting 时温和触发 HLS 续拉（避免一直卡住）
+            const stallState = { waitingTimer: null };
+            const recoverFromBufferStall = () => {
+              if (video.error) return;
+              if (hlsInstanceRef.current !== hls) return;
+              try {
+                console.warn('WTV HLS video stalled/waiting → startLoad');
+                hls.startLoad();
+              } catch (_) { /* ignore */ }
+            };
+            const onStalled = () => recoverFromBufferStall();
+            const onWaiting = () => {
+              if (stallState.waitingTimer) clearTimeout(stallState.waitingTimer);
+              stallState.waitingTimer = setTimeout(() => {
+                stallState.waitingTimer = null;
+                if (video.error) return;
+                if (video.readyState < 3) recoverFromBufferStall();
+              }, 2800);
+            };
+            video.addEventListener('stalled', onStalled);
+            video.addEventListener('waiting', onWaiting);
+            video._wtvStallRecovery = {
+              teardown: () => {
+                if (stallState.waitingTimer) {
+                  clearTimeout(stallState.waitingTimer);
+                  stallState.waitingTimer = null;
+                }
+                video.removeEventListener('stalled', onStalled);
+                video.removeEventListener('waiting', onWaiting);
+              },
+            };
 
           } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
             // Safari 原生 HLS
@@ -856,6 +960,12 @@ const MyArtPlayer = forwardRef(({
             video.removeEventListener(type, handler);
           });
           delete video._artPlayerHandlers;
+        }
+        if (video._wtvStallRecovery?.teardown) {
+          try {
+            video._wtvStallRecovery.teardown();
+          } catch (_) { /* ignore */ }
+          delete video._wtvStallRecovery;
         }
         if (video.hls) {
           try { video.hls.destroy(); } catch (_) { /* ignore */ }

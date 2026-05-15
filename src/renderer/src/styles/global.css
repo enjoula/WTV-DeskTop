@@ -608,6 +608,11 @@ body {
   padding: 12px 20px 20px;
 }
 
+/* 分类列表页：缩小顶栏标题与筛选区之间的留白（避免 main + 列表页双重 padding + 空 header） */
+.main-content:has(.video-list-page) {
+  padding-top: 10px;
+}
+
 /* Header Styles */
 .app-header {
   position: fixed;
@@ -1653,7 +1658,7 @@ button:disabled {
 .video-list-page {
   max-width: calc(1400px + 80px); /* 最大宽度 = 内容宽度 + 左右边距 */
   margin: 0 auto; /* 居中显示 */
-  padding: 20px 40px; /* 统一左右边距 40px */
+  padding: 6px 40px 16px; /* 顶部收紧，贴近顶栏分类标题 */
   background-color: #0f0f0f; /* 确保列表页面背景是深色 */
   min-height: 100vh;
   overflow-y: visible;
@@ -1661,16 +1666,30 @@ button:disabled {
   box-sizing: border-box; /* padding 包含在 width 内 */
 }
 
+/* 列表页筛选区整体略收紧 */
+.video-list-page .filter-section {
+  margin-bottom: 14px;
+}
+
+.video-list-page .filter-panel {
+  padding: 10px 12px;
+  margin-bottom: 0;
+}
+
+.video-list-page .filter-rows {
+  gap: 10px;
+}
+
 /* 响应式调整 */
 @media (max-width: 1024px) {
   .video-list-page {
-    padding: 20px 30px; /* 左右各 30px */
+    padding: 6px 30px 16px; /* 左右各 30px */
   }
 }
 
 @media (max-width: 768px) {
   .video-list-page {
-    padding: 20px; /* 左右各 20px */
+    padding: 6px 20px 16px; /* 左右各 20px */
   }
 }
 
@@ -1678,7 +1697,7 @@ button:disabled {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 20px;
+  margin-bottom: 10px;
 }
 
 .video-list-page .page-header h1 {

@@ -45,11 +45,10 @@ const VideoDetail = () => {
   const dispatch = useDispatch();
   const searchParams = new URLSearchParams(location.search);
   const isNewWindow = searchParams.get('newWindow') === 'true';
-  // Electron 播放窗口历史上使用过两种参数：
-  // - newWindow=true（当前主路径）
-  // - playerWindow=true（兼容旧逻辑）
-  // 统一按“任一命中即为播放器窗口”处理，避免在播放窗口内再次 openPlayerWindow 导致多开。
-  const isPlayerWindow = isNewWindow || searchParams.get('playerWindow') === 'true';
+  // 仅 `playerWindow=true` 表示「专用播放窗口」（openPlayerWindow 打开，带 newWindow+autoplay 等）。
+  // `openVideoWindow` 打开的详情页只带 `newWindow=true`，不能算播放窗口，否则误判后不会打开独立播放窗，
+  // 或出现详情/主窗口与播放窗口状态错乱（用户感觉「详情没了只剩首页+播放」）。
+  const isPlayerWindow = searchParams.get('playerWindow') === 'true';
   
   // 🎮 初始化播放控制器（使用 useRef 确保实例稳定）
   const playbackControllerRef = useRef(null);
@@ -2202,6 +2201,10 @@ const VideoDetail = () => {
     }
 
     const params = new URLSearchParams(location.search);
+    // 从播放记录打开播放窗：续播进度由 executeAutoPlayFromHistory + getVideoData().playHistory 处理，勿在此处 handlePlay/handleMoviePlay
+    if (params.get('fromPlayHistory') === 'true') {
+      return;
+    }
     const targetEpisode = pendingAutoPlayEpisodeRef.current || params.get('autoplayEpisode');
     const videoType = mapVideoType(videoInfo?.type || currentCategory || 'tv');
     const isMovie = videoType === 'movie';

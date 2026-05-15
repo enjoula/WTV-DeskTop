@@ -63,6 +63,19 @@ const Header = () => {
     };
   }, [isMenuOpen]);
 
+  /** 在分类列表页再次点击当前分类标题：回到第一页并刷新（由 VideoList 监听自定义事件） */
+  const handleCategoryNavClick = (path, e) => {
+    const pathname = location.pathname.replace(/\/$/, '') || '/';
+    const target = path.replace(/\/$/, '') || '/';
+    if (pathname === target) {
+      e.preventDefault();
+      const category = path.replace(/^\/videos\//, '').replace(/\/$/, '');
+      window.dispatchEvent(
+        new CustomEvent('wtv:video-list-reset', { detail: { category } })
+      );
+    }
+  };
+
   const isActive = (path) => {
     const { pathname } = location;
     // 列表页：严格匹配自身路径或其子路径，避免 /videos/tv 和 /videos/tvshow 同时高亮
@@ -95,23 +108,43 @@ const Header = () => {
         </Link>
         
         <nav className="main-nav">
-          <Link to="/videos/movies" className={isActive('/videos/movies') ? 'active' : ''}>
+          <Link
+            to="/videos/movies"
+            className={isActive('/videos/movies') ? 'active' : ''}
+            onClick={(e) => handleCategoryNavClick('/videos/movies', e)}
+          >
             <PlatformIcon className="nav-icon" iconName="movie" fallback="🎬" />
             <span className="nav-text">电影</span>
           </Link>
-          <Link to="/videos/tv" className={isActive('/videos/tv') ? 'active' : ''}>
+          <Link
+            to="/videos/tv"
+            className={isActive('/videos/tv') ? 'active' : ''}
+            onClick={(e) => handleCategoryNavClick('/videos/tv', e)}
+          >
             <PlatformIcon className="nav-icon" iconName="tv" fallback="📺" />
             <span className="nav-text">电视剧</span>
           </Link>
-          <Link to="/videos/anime" className={isActive('/videos/anime') ? 'active' : ''}>
+          <Link
+            to="/videos/anime"
+            className={isActive('/videos/anime') ? 'active' : ''}
+            onClick={(e) => handleCategoryNavClick('/videos/anime', e)}
+          >
             <PlatformIcon className="nav-icon" iconName="anime" fallback="🎨" />
             <span className="nav-text">动漫</span>
           </Link>
-          <Link to="/videos/tvshow" className={isActive('/videos/tvshow') ? 'active' : ''}>
+          <Link
+            to="/videos/tvshow"
+            className={isActive('/videos/tvshow') ? 'active' : ''}
+            onClick={(e) => handleCategoryNavClick('/videos/tvshow', e)}
+          >
             <PlatformIcon className="nav-icon" iconName="variety" fallback="🎪" />
             <span className="nav-text">综艺</span>
           </Link>
-          <Link to="/videos/documentary" className={isActive('/videos/documentary') ? 'active' : ''}>
+          <Link
+            to="/videos/documentary"
+            className={isActive('/videos/documentary') ? 'active' : ''}
+            onClick={(e) => handleCategoryNavClick('/videos/documentary', e)}
+          >
             <PlatformIcon className="nav-icon" iconName="documentary" fallback="📽️" />
             <span className="nav-text">纪录片</span>
           </Link>

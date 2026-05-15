@@ -71,7 +71,7 @@ export const fetchVarietyShows = createAsyncThunk(
       const response = await getVarietyShows(params);
       return response.data;
     } catch (error) {
-      return rejectWithValue(error.response.data);
+      return rejectWithValue(error.response?.data || error.message);
     }
   }
 );
@@ -84,7 +84,7 @@ export const fetchDocumentaries = createAsyncThunk(
       const response = await getDocumentaries(params);
       return response.data;
     } catch (error) {
-      return rejectWithValue(error.response.data);
+      return rejectWithValue(error.response?.data || error.message);
     }
   }
 );
@@ -97,7 +97,7 @@ export const fetchFilters = createAsyncThunk(
       const response = await getFilters(type);
       return response.data;
     } catch (error) {
-      return rejectWithValue(error.response.data);
+      return rejectWithValue(error.response?.data || error.message);
     }
   }
 );
@@ -128,7 +128,7 @@ export const filterVideoList = createAsyncThunk(
       const response = await filterVideos(params);
       return response.data;
     } catch (error) {
-      return rejectWithValue(error.response.data);
+      return rejectWithValue(error.response?.data || error.message);
     }
   }
 );
@@ -141,7 +141,7 @@ export const searchVideoList = createAsyncThunk(
       const response = await searchVideos(params);
       return response.data;
     } catch (error) {
-      return rejectWithValue(error.response.data);
+      return rejectWithValue(error.response?.data || error.message);
     }
   }
 );
@@ -154,7 +154,7 @@ export const fetchEpisodes = createAsyncThunk(
       const response = await getEpisodes(videoId);
       return response.data;
     } catch (error) {
-      return rejectWithValue(error.response.data);
+      return rejectWithValue(error.response?.data || error.message);
     }
   }
 );

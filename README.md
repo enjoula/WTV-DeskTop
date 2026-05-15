@@ -111,8 +111,16 @@ WTV-DeskTop/
 - **npm**: >= 6.x 或 **yarn**: >= 1.x
 - **操作系统**: 
   - macOS (10.13+)
-  - Windows (10+)
-  - Linux (可选)
+  - Windows (7 SP1+，推荐 10/11)
+  - Linux (推荐 Ubuntu 18.04+)
+
+### 桌面端系统兼容性
+
+| 平台 | 最低支持版本 | 推荐版本 | 备注 |
+|---|---|---|---|
+| Windows | Windows 7 SP1（x64） | Windows 10 / 11 | Win7 需启用 TLS 1.2、更新根证书，否则可能出现 HTTPS 接口访问失败 |
+| macOS | macOS 10.13 High Sierra | macOS 12+ | 支持 Apple Silicon（arm64）与 Intel（x64）构建 |
+| Linux | Ubuntu 18.04+（x64/arm64） | Ubuntu 20.04+ | 使用 AppImage 打包，依赖系统基础库版本 |
 
 ## 🚀 快速开始
 
@@ -341,6 +349,17 @@ node build-all.js --ubuntu-only
 - 清理缓存后重试：删除 `node_modules` 和 `dist` 目录
 - 检查系统权限（特别是 macOS 的签名权限）
 - 查看详细的错误日志
+
+**若日志中出现从 `github.com/electron/electron/releases` 下载 zip 失败**（`EOF`、`504`、`timeout`、`dial tcp ...:443` 等）：属于 **Electron 运行时二进制拉取失败**，**不是 React/业务代码编译错误**（上方若已显示 `Compiled successfully` 即前端已构建成功）。可任选：
+
+1. **本项目已默认使用 npmmirror**（根目录 `.npmrc` 的 `electron_mirror`、`package.json` → `build.electronDownload.mirror`，以及 `build-all.js` 在未设置 `ELECTRON_MIRROR` 时注入镜像）。拉取最新代码后重新执行 `npm run build:all` 即可。
+2. **临时覆盖镜像**（zsh/bash）：
+   ```bash
+   export ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/
+   npm run build:all
+   ```
+3. **代理或换网络**后再执行 `npm run build:all`；已下载的缓存一般在 `~/.cache/electron/`，保留可减少重复下载。
+4. **若需强制从 GitHub 下载**（例如海外环境）：删除或注释根目录 `.npmrc` 中的 `electron_mirror`，从 `package.json` 的 `build` 中移除 `electronDownload` 块，并自行设置可访问的 `ELECTRON_MIRROR` 后打包。
 
 ### 5. 跨平台打包
 
