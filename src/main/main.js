@@ -1170,6 +1170,19 @@ ipcMain.handle('update-video-window-title', (event, title) => {
   return false;
 });
 
+// 播放窗切集 → 同步到后台详情窗 / 主窗口，保持选中集一致
+ipcMain.on('player-episode-changed', (event, payload) => {
+  const { videoId, episodeNumber } = payload || {};
+  if (videoId === undefined || videoId === null || episodeNumber === undefined || episodeNumber === null) {
+    return;
+  }
+  BrowserWindow.getAllWindows().forEach((win) => {
+    if (!win || win.isDestroyed()) return;
+    if (win.webContents === event.sender) return;
+    win.webContents.send('player-episode-changed', { videoId, episodeNumber });
+  });
+});
+
 // 获取当前视频窗口的视频数据
 ipcMain.handle('get-video-data', (event) => {
   if (videoWindow && !videoWindow.isDestroyed() && event.sender === videoWindow.webContents) {

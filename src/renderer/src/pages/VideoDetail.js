@@ -94,6 +94,9 @@ const VideoDetail = () => {
   }); // 视频显示模式：contain(16:9), cover(裁剪), fill(填充), none(原比例)
   const [isPictureInPicture, setIsPictureInPicture] = useState(false); // 画中画状态
   const [isFullscreen, setIsFullscreen] = useState(false); // 全屏状态
+  const isFullscreenRef = useRef(false); // 全屏状态 ref，避免闭包读到旧值
+  const pendingRestoreFullscreenRef = useRef(false); // 切集后恢复文档全屏
+  const suppressFullscreenExitRef = useRef(false); // 切集重建播放器期间，禁止把「文档全屏丢失」同步成退出窗口全屏
   const isSeekingRef = useRef(false); // 是否正在拖动播放进度
   const seekProtectionEndTimeRef = useRef(0); // 🔧 拖动保护期结束时间（毫秒），在此时间之前忽略所有播放/暂停事件
   const playerRef = useRef(null);
@@ -135,6 +138,107 @@ const VideoDetail = () => {
     
     return null;
   }, []);
+
+  useEffect(() => {
+    isFullscreenRef.current = isFullscreen;
+  }, [isFullscreen]);
+
+  const isDocumentFullscreen = useCallback(() => !!(
+    document.fullscreenElement ||
+    document.webkitFullscreenElement ||
+    document.mozFullScreenElement ||
+    document.msFullscreenElement
+  ), []);
+
+  // 切集会销毁全屏目标节点，导致文档全屏退出；先记下意图，并用窗口全屏撑住观感
+  const markKeepFullscreenIfNeeded = useCallback(() => {
+    if (isDocumentFullscreen() || isFullscreenRef.current) {
+      pendingRestoreFullscreenRef.current = true;
+      suppressFullscreenExitRef.current = true;
+      isFullscreenRef.current = true;
+      setIsFullscreen(true);
+      // 文档全屏依赖用户手势，自动下一集后可能无法立刻 requestFullscreen；
+      // Electron 窗口全屏无此限制，先维持全屏画面。
+      if (window.electronAPI?.setFullScreen) {
+        window.electronAPI.setFullScreen(true).catch(() => {});
+      }
+    }
+  }, [isDocumentFullscreen]);
+
+  const restoreFullscreenIfNeeded = useCallback(async () => {
+    if (!pendingRestoreFullscreenRef.current) return;
+
+    const requestDocFullscreen = async (element) => {
+      if (!element) return false;
+      try {
+        if (element.requestFullscreen) await element.requestFullscreen();
+        else if (element.webkitRequestFullscreen) await element.webkitRequestFullscreen();
+        else if (element.mozRequestFullScreen) await element.mozRequestFullScreen();
+        else if (element.msRequestFullscreen) await element.msRequestFullscreen();
+        else return false;
+        return true;
+      } catch (err) {
+        console.warn('恢复文档全屏失败:', err);
+        return false;
+      }
+    };
+
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      if (isDocumentFullscreen()) {
+        pendingRestoreFullscreenRef.current = false;
+        suppressFullscreenExitRef.current = false;
+        isFullscreenRef.current = true;
+        setIsFullscreen(true);
+        return;
+      }
+
+      const videoElement = (() => {
+        try {
+          return getVideoElement();
+        } catch (_) {
+          return null;
+        }
+      })() || playerRef.current?.wrapper?.querySelector?.('video');
+      const fullscreenTarget = playerRef.current?.wrapper || videoElement?.parentElement || videoElement;
+
+      if (fullscreenTarget && await requestDocFullscreen(fullscreenTarget)) {
+        pendingRestoreFullscreenRef.current = false;
+        isFullscreenRef.current = true;
+        setIsFullscreen(true);
+        window.setTimeout(() => {
+          suppressFullscreenExitRef.current = false;
+        }, 800);
+        return;
+      }
+
+      await new Promise((resolve) => {
+        window.setTimeout(resolve, 180);
+      });
+    }
+
+    // 文档全屏恢复失败时，保留 Electron 窗口全屏（自动连播常见）
+    pendingRestoreFullscreenRef.current = false;
+    suppressFullscreenExitRef.current = false;
+    isFullscreenRef.current = true;
+    setIsFullscreen(true);
+    if (window.electronAPI?.setFullScreen) {
+      window.electronAPI.setFullScreen(true).catch(() => {});
+    }
+  }, [getVideoElement, isDocumentFullscreen]);
+
+  const notifyBackgroundEpisodeChanged = useCallback((episodeNumber) => {
+    if (!isPlayerWindow || !window.electronAPI?.notifyPlayerEpisodeChanged) return;
+    const videoId = videoInfo?.videoid || videoInfo?.vod_id || id;
+    if (videoId === undefined || videoId === null || episodeNumber === undefined || episodeNumber === null) {
+      return;
+    }
+    try {
+      window.electronAPI.notifyPlayerEpisodeChanged(videoId, episodeNumber);
+    } catch (err) {
+      console.warn('同步后台选中集失败:', err);
+    }
+  }, [id, isPlayerWindow, videoInfo]);
+
   const justSwitchedEpisodeRef = useRef(false); // 是否刚刚切换了集数（用于避免拖动后循环暂停播放）
   const videoLoadTimeoutRef = useRef(null); // 视频加载超时定时器
   const errorRetryRef = useRef(0); // 错误重试次数
@@ -1310,6 +1414,9 @@ const VideoDetail = () => {
         ...(videoInfo || {}),
         id: playbackVideoId,
       });
+      // 后台详情窗立即高亮当前集，与播放窗保持一致
+      setSelectedEpisode(episodeNumber);
+      updateVideoWindowTitle(episodeNumber);
       window.electronAPI.openPlayerWindow(playbackVideoId, normalizedVideo, episodeNumber)
         .then(() => {
           showCenterTip('已切换到播放窗口');
@@ -1320,6 +1427,9 @@ const VideoDetail = () => {
         });
       return;
     }
+
+    // 切集会重建播放器并销毁全屏节点；先记下全屏意图，待就绪后恢复
+    markKeepFullscreenIfNeeded();
 
     // 🔧 清除拖动定时器（切换视频时清除之前的拖动状态）
     if (seekTimeoutRef.current) {
@@ -1347,6 +1457,7 @@ const VideoDetail = () => {
     const videoId = videoInfo?.videoid || videoInfo?.vod_id || id;
     console.log('Using videoId for play:', videoId);
     setSelectedEpisode(episodeNumber);
+    notifyBackgroundEpisodeChanged(episodeNumber);
     wtvPlayLog('play.selectedEpisode', {
       videoId,
       selectedEpisode: episodeNumber
@@ -1521,6 +1632,8 @@ const VideoDetail = () => {
 
   // 从指定时间开始播放
   const handlePlayFromTime = (episodeNumber, startTime) => {
+    markKeepFullscreenIfNeeded();
+
     // 🔧 清除拖动定时器（切换视频时清除之前的拖动状态）
     if (seekTimeoutRef.current) {
       clearTimeout(seekTimeoutRef.current);
@@ -1533,6 +1646,7 @@ const VideoDetail = () => {
     isPlayingRef.current = true;
     
     setSelectedEpisode(episodeNumber);
+    notifyBackgroundEpisodeChanged(episodeNumber);
     
     // 更新窗口标题（如果在新窗口中播放）
     updateVideoWindowTitle(episodeNumber);
@@ -1985,6 +2099,9 @@ const VideoDetail = () => {
         setIsPlaying(true);
         isPlayingRef.current = true;
 
+        // 下一集重建播放器前记下全屏，避免文档全屏被销毁后无法恢复
+        markKeepFullscreenIfNeeded();
+
         wtvPlayLog('autonext.goto', { videoId: id, from: selectedEpisode, to: nextEpisodeNumber });
         showCenterTip(`正在播放第${nextEpisodeNumber}集`);
         setTimeout(() => {
@@ -2010,10 +2127,11 @@ const VideoDetail = () => {
       showCenterTip('已经是最后一集');
       return;
     }
+    markKeepFullscreenIfNeeded();
     showCenterTip(`正在播放第${nextEpisodeNumber}集`);
     handlePlay(nextEpisodeNumber, { skipLoginCheck: true });
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [getNextEpisodeNumber, handlePlay]);
+  }, [getNextEpisodeNumber, handlePlay, markKeepFullscreenIfNeeded]);
 
   const toggleAutoNextEpisode = useCallback((options = {}) => {
     const { showTip = true, nextValue: forcedValue } = options;
@@ -2241,6 +2359,11 @@ const VideoDetail = () => {
     setPlayerReady(true);
     // 清除刚刚切换集数的标志，因为播放器已经准备好了
     justSwitchedEpisodeRef.current = false;
+
+    // 自动下一集等场景：播放器重建后恢复全屏
+    if (pendingRestoreFullscreenRef.current) {
+      restoreFullscreenIfNeeded();
+    }
     
     // 检查是否有续播时间需要设置
     const resumeTime = resumeTimeRef.current;
@@ -2771,6 +2894,11 @@ const VideoDetail = () => {
                                      document.webkitFullscreenElement || 
                                      document.mozFullScreenElement || 
                                      document.msFullscreenElement);
+      // 切集重建期间文档全屏会短暂丢失，此时保持「待恢复」意图，不把 UI 状态打成非全屏
+      if (!currentlyFullscreen && suppressFullscreenExitRef.current) {
+        return;
+      }
+      isFullscreenRef.current = currentlyFullscreen;
       setIsFullscreen(currentlyFullscreen);
     };
     
@@ -2802,12 +2930,51 @@ const VideoDetail = () => {
         document.mozFullScreenElement ||
         document.msFullscreenElement
       );
-      setIsFullscreen(currentlyFullscreen);
 
-      if (!currentlyFullscreen && window.electronAPI?.isFullScreen && window.electronAPI?.setFullScreen) {
+      // 切集重建播放器期间：文档全屏节点被销毁属预期，不退出窗口全屏、不改 UI 状态
+      if (suppressFullscreenExitRef.current || pendingRestoreFullscreenRef.current) {
+        if (currentlyFullscreen) {
+          isFullscreenRef.current = true;
+          setIsFullscreen(true);
+        }
+        return;
+      }
+
+      if (currentlyFullscreen) {
+        isFullscreenRef.current = true;
+        setIsFullscreen(true);
+        return;
+      }
+
+      // 文档未全屏，但 UI 仍认为全屏：可能是窗口全屏兜底，需核对 Electron 状态
+      if (isFullscreenRef.current && window.electronAPI?.isFullScreen) {
         window.electronAPI.isFullScreen()
           .then((isWindowFullscreen) => {
-            if (isWindowFullscreen) {
+            if (suppressFullscreenExitRef.current || pendingRestoreFullscreenRef.current) {
+              return;
+            }
+            if (!isWindowFullscreen) {
+              isFullscreenRef.current = false;
+              setIsFullscreen(false);
+            }
+          })
+          .catch(() => {});
+        return;
+      }
+
+      isFullscreenRef.current = false;
+      setIsFullscreen(false);
+
+      // UI 已非全屏时，清理残留窗口全屏
+      if (window.electronAPI?.isFullScreen && window.electronAPI?.setFullScreen) {
+        window.electronAPI.isFullScreen()
+          .then((isWindowFullscreen) => {
+            if (
+              isWindowFullscreen &&
+              !isFullscreenRef.current &&
+              !suppressFullscreenExitRef.current &&
+              !pendingRestoreFullscreenRef.current
+            ) {
               window.electronAPI.setFullScreen(false).catch(() => {});
             }
           })
@@ -2817,6 +2984,11 @@ const VideoDetail = () => {
 
     const handleEscSync = (event) => {
       if (event.key !== 'Escape') return;
+      // 用户主动 Esc：取消「待恢复全屏」意图
+      if (suppressFullscreenExitRef.current || pendingRestoreFullscreenRef.current) {
+        pendingRestoreFullscreenRef.current = false;
+        suppressFullscreenExitRef.current = false;
+      }
       syncFullscreenState();
     };
 
@@ -2837,6 +3009,28 @@ const VideoDetail = () => {
       document.removeEventListener('keydown', handleEscSync);
     };
   }, [playerReady]);
+
+  // 后台详情窗 / 主窗口：跟随播放窗当前集，保持选中态与标题一致
+  useEffect(() => {
+    if (isPlayerWindow || !window.electronAPI?.onPlayerEpisodeChanged) return undefined;
+
+    return window.electronAPI.onPlayerEpisodeChanged(({ videoId, episodeNumber } = {}) => {
+      const currentVideoId = videoInfo?.videoid || videoInfo?.vod_id || id;
+      if (
+        videoId === undefined ||
+        videoId === null ||
+        episodeNumber === undefined ||
+        episodeNumber === null
+      ) {
+        return;
+      }
+      if (String(videoId) !== String(currentVideoId) && String(videoId) !== String(id)) {
+        return;
+      }
+      setSelectedEpisode(episodeNumber);
+      updateVideoWindowTitle(episodeNumber);
+    });
+  }, [id, isPlayerWindow, updateVideoWindowTitle, videoInfo]);
 
   const togglePlayerFullscreen = useCallback(async () => {
     const getDocFullscreenElement = () => (
@@ -2867,7 +3061,11 @@ const VideoDetail = () => {
     try {
       const isDocFullscreen = !!getDocFullscreenElement();
       if (isDocFullscreen) {
+        // 用户主动退出全屏：取消切集后的恢复意图
+        pendingRestoreFullscreenRef.current = false;
+        suppressFullscreenExitRef.current = false;
         await exitDocFullscreen();
+        isFullscreenRef.current = false;
         setIsFullscreen(false);
         if (window.electronAPI?.setFullScreen) {
           window.electronAPI.setFullScreen(false).catch(() => {});
@@ -2879,9 +3077,12 @@ const VideoDetail = () => {
         try {
           const isWindowFullscreen = await window.electronAPI.isFullScreen();
           if (isWindowFullscreen) {
+            pendingRestoreFullscreenRef.current = false;
+            suppressFullscreenExitRef.current = false;
             await window.electronAPI.setFullScreen(false);
             // 处于“窗口全屏但文档未全屏”的异常状态时，
             // 本次点击仅用于退出窗口全屏，避免立即再次进入全屏导致无法退出。
+            isFullscreenRef.current = false;
             setIsFullscreen(false);
             return;
           }
@@ -2900,6 +3101,7 @@ const VideoDetail = () => {
 
       const fullscreenTarget = playerRef.current?.wrapper || videoElement?.parentElement || videoElement;
       await requestDocFullscreen(fullscreenTarget);
+      isFullscreenRef.current = true;
       setIsFullscreen(true);
     } catch (err) {
       console.error('切换全屏失败:', err);

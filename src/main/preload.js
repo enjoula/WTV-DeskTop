@@ -14,6 +14,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openPageWindow: (path, title) => ipcRenderer.invoke('open-page-window', path, title),
   updateVideoWindowTitle: (title) => ipcRenderer.invoke('update-video-window-title', title),
   getVideoData: () => ipcRenderer.invoke('get-video-data'),
+  /** 播放窗切集时通知其它窗口同步选中集数 */
+  notifyPlayerEpisodeChanged: (videoId, episodeNumber) => {
+    ipcRenderer.send('player-episode-changed', { videoId, episodeNumber });
+  },
+  onPlayerEpisodeChanged: (callback) => {
+    const handler = (_event, data) => callback(data);
+    ipcRenderer.on('player-episode-changed', handler);
+    return () => {
+      ipcRenderer.removeListener('player-episode-changed', handler);
+    };
+  },
   downloadUpdate: (downloadUrl, fileName) => ipcRenderer.invoke('download-update', downloadUrl, fileName),
   installUpdate: (filePath) => ipcRenderer.invoke('install-update', filePath),
   onDownloadProgress: (callback) => {
