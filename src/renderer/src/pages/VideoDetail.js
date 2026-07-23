@@ -150,18 +150,15 @@ const VideoDetail = () => {
     document.msFullscreenElement
   ), []);
 
-  // 切集会销毁全屏目标节点，导致文档全屏退出；先记下意图，并用窗口全屏撑住观感
+  // 切集会销毁全屏目标节点，导致文档全屏退出。
+  // 仅用「待恢复」标记 + 稍后 requestFullscreen；不要在这里 setFullScreen(true)，
+  // 否则会与 HTML 全屏 API 互相污染，导致下次点击变成窗口全屏。
   const markKeepFullscreenIfNeeded = useCallback(() => {
     if (isDocumentFullscreen() || isFullscreenRef.current) {
       pendingRestoreFullscreenRef.current = true;
       suppressFullscreenExitRef.current = true;
       isFullscreenRef.current = true;
       setIsFullscreen(true);
-      // 文档全屏依赖用户手势，自动下一集后可能无法立刻 requestFullscreen；
-      // Electron 窗口全屏无此限制，先维持全屏画面。
-      if (window.electronAPI?.setFullScreen) {
-        window.electronAPI.setFullScreen(true).catch(() => {});
-      }
     }
   }, [isDocumentFullscreen]);
 
@@ -216,14 +213,10 @@ const VideoDetail = () => {
       });
     }
 
-    // 文档全屏恢复失败时，保留 Electron 窗口全屏（自动连播常见）
+    // 自动连播后可能无用户手势，文档全屏会失败；保持 UI 状态但不调用窗口全屏，
+    // 避免污染后续手动全屏。
     pendingRestoreFullscreenRef.current = false;
     suppressFullscreenExitRef.current = false;
-    isFullscreenRef.current = true;
-    setIsFullscreen(true);
-    if (window.electronAPI?.setFullScreen) {
-      window.electronAPI.setFullScreen(true).catch(() => {});
-    }
   }, [getVideoElement, isDocumentFullscreen]);
 
   const notifyBackgroundEpisodeChanged = useCallback((episodeNumber) => {
@@ -294,7 +287,19 @@ const VideoDetail = () => {
     hasAutoPlayFromPlayerWindowRef.current = false;
     const params = new URLSearchParams(location.search);
     pendingAutoPlayEpisodeRef.current = params.get('autoplayEpisode');
-  }, [id, isPlayerWindow, location.search]);
+
+    // 播放窗被复用切到新的续播/自动播放请求时，允许再次触发续播，并清掉上一支的播放态
+    hasAutoPlayFromHistoryRef.current = false;
+    autoNextInFlightRef.current = false;
+    resumeTimeRef.current = null;
+    if (params.get('fromPlayHistory') === 'true' || params.get('_ts')) {
+      setIsMoviePlaying(false);
+      setIsEpisodePlaying(false);
+      setPlayerReady(false);
+      setSelectedEpisode(null);
+      dispatch(clearPlayUrl());
+    }
+  }, [id, isPlayerWindow, location.search, dispatch]);
 
   // 统一类型映射
   const mapVideoType = (type) => {
@@ -319,6 +324,9 @@ const VideoDetail = () => {
   };
 
   useEffect(() => {
+    let cancelled = false;
+    const requestId = id;
+
     // 检查是否从播放记录跳转过来
     let playHistory = location.state?.playHistory;
     const basicVideo = location.state?.video;
@@ -390,8 +398,10 @@ const VideoDetail = () => {
       
       if (typeVideo) {
         console.log('从类型列表中找到视频信息:', typeVideo);
-        setVideoInfo(normalizeVideoInfo(typeVideo));
-        return;
+        if (!cancelled) {
+          setVideoInfo(normalizeVideoInfo(typeVideo));
+        }
+        // 仍继续走 Electron 加载，确保播放窗拿到最新 currentPlayerVideoData
       }
     }
     
@@ -413,7 +423,7 @@ const VideoDetail = () => {
     }
     
     // 如果有可立即使用的视频信息，先设置它（避免页面空白）
-    if (immediateVideoInfo) {
+    if (immediateVideoInfo && !cancelled) {
       setVideoInfo(normalizeVideoInfo(immediateVideoInfo));
       
       // 设置 currentCategory
@@ -449,6 +459,12 @@ const VideoDetail = () => {
       }
     }
     
+    const matchesCurrentVideo = (data) => {
+      if (!data || requestId == null) return false;
+      const candidates = [data.id, data.videoid, data.vod_id, data.playHistory?.videoId];
+      return candidates.some((candidate) => candidate != null && String(candidate) === String(requestId));
+    };
+
     // 异步获取 Electron API 数据（如果存在则更新，优先级最高）
     const loadVideoDataFromElectron = async () => {
       let electronData = null;
@@ -457,22 +473,29 @@ const VideoDetail = () => {
       if (window.electronAPI && window.electronAPI.getVideoData) {
         try {
           const data = await window.electronAPI.getVideoData();
-          if (data) {
+          if (cancelled || String(requestId) !== String(id)) return;
+
+          if (data && matchesCurrentVideo(data)) {
             console.log('从 Electron API 读取视频数据:', data);
             electronData = data;
-            if (isPlayerWindow && data.autoPlayEpisode) {
+            if (isPlayerWindow && data.autoPlayEpisode != null && data.autoPlayEpisode !== '') {
               pendingAutoPlayEpisodeRef.current = data.autoPlayEpisode;
             }
             
             // 如果 Electron API 数据中包含 playHistory，更新 playHistory 变量
-            if (data.playHistory && !playHistory) {
+            if (data.playHistory) {
               playHistory = data.playHistory;
               console.log('从 Electron API 数据中获取播放记录:', playHistory);
             }
+          } else if (data) {
+            console.warn('Electron API 视频数据与当前 id 不匹配，忽略:', {
+              requestId,
+              dataId: data.id || data.videoid || data.vod_id,
+            });
           } else {
             console.log('从 Electron API 读取的数据为空，使用之前找到的视频信息或 Redux store 中的数据');
             // 如果 Electron API 数据为空，使用之前找到的 foundVideo（已经在外部计算好了）
-      if (foundVideo) {
+            if (foundVideo) {
               electronData = foundVideo;
             }
           }
@@ -485,6 +508,8 @@ const VideoDetail = () => {
         }
       }
       
+      if (cancelled || String(requestId) !== String(id)) return;
+
       // 确定最终使用的视频信息
       let finalVideoInfo = null;
       
@@ -501,7 +526,7 @@ const VideoDetail = () => {
         console.log('未找到完整视频信息，使用播放记录中的基本信息');
         const videoType = playHistory?.videoType || basicVideo?.type || 'movie';
         finalVideoInfo = {
-      id: id,
+          id: id,
           title: playHistory?.videoTitle || basicVideo?.title || "视频标题",
           description: "暂无简介", // 暂时显示"暂无简介"，后续可以通过搜索获取
           cover_url: playHistory?.videoCover || basicVideo?.cover_url || basicVideo?.pic || "https://via.placeholder.com/300x400",
@@ -515,6 +540,7 @@ const VideoDetail = () => {
           // 使用视频标题搜索，尝试找到完整的视频信息
           dispatch(searchVideoList({ keyword: playHistory.videoTitle, page: 1, size: 10 }))
             .then((result) => {
+              if (cancelled || String(requestId) !== String(id)) return;
               if (result.meta.requestStatus === 'fulfilled' && result.payload?.data) {
                 // 在搜索结果中查找匹配的视频（通过ID匹配）
                 const matchedVideo = result.payload.data.find(video => 
@@ -538,7 +564,7 @@ const VideoDetail = () => {
       }
       
       // 设置视频信息
-      if (finalVideoInfo) {
+      if (finalVideoInfo && !cancelled && String(requestId) === String(id)) {
         const normalizedInfo = normalizeVideoInfo(finalVideoInfo);
         setVideoInfo(normalizedInfo);
         
@@ -553,7 +579,11 @@ const VideoDetail = () => {
     
     // 执行异步加载
     loadVideoDataFromElectron();
-  }, [id, isPlayerWindow, location.state, movies.data, tvShows.data, anime.data, varietyShows.data, documentaries.data, searchResults.data, filterResults.data, favorites.data, currentCategory, dispatch]);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [id, isPlayerWindow, location.state, location.search, movies.data, tvShows.data, anime.data, varietyShows.data, documentaries.data, searchResults.data, filterResults.data, favorites.data, currentCategory, dispatch]);
 
   // 动态更新浏览器页面标题（document.title）
   useEffect(() => {
@@ -626,17 +656,25 @@ const VideoDetail = () => {
     console.log('根据收藏列表更新收藏状态:', { videoId: id, isFavorite: inFav, favoritesCount: list.length });
   }, [isAuthenticated, favorites?.data, favorites?.pagination, favorites?.loading, id, dispatch]);
 
-  // 当视频ID变化时，重置播放状态（但保留用户设置）
+  // 当视频ID变化时，重置播放状态与视频信息，避免播放窗复用时残留上一支片子
   useEffect(() => {
     // 🎮 重置控制器状态
     controller.reset();
-    
+
+    setVideoInfo(null);
     setIsMoviePlaying(false);
+    setIsEpisodePlaying(false);
     setPlayerReady(false);
     setSelectedEpisode(null);
     // 使用用户设置的自动播放偏好，而不是硬编码 false
     setIsPlaying(playerSettings.autoplay);
-    hasSkippedRef.current = false; // 重置快进状态
+    hasSkippedRef.current = false;
+    hasAutoPlayFromHistoryRef.current = false;
+    hasAutoPlayFromPlayerWindowRef.current = false;
+    autoNextInFlightRef.current = false;
+    resumeTimeRef.current = null;
+    pendingAutoPlayEpisodeRef.current = null;
+    dispatch(clearPlayUrl());
   }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 监听视频显示模式变化，应用到视频元素
@@ -2720,16 +2758,35 @@ const VideoDetail = () => {
       hasVideoInfo: !!videoInfo,
       hasAutoPlayed: hasAutoPlayFromHistoryRef.current,
       selectedEpisode,
-      isEpisodePlaying
+      isEpisodePlaying,
+      routeId: id,
     });
     
     if (!playHistory) {
       console.warn('executeAutoPlayFromHistory: 没有播放记录数据');
       return;
     }
+
+    // 播放窗复用切片时，忽略过期的续播回调
+    if (playHistory.videoId != null && String(playHistory.videoId) !== String(id)) {
+      console.warn('executeAutoPlayFromHistory: playHistory.videoId 与当前路由 id 不一致，跳过', {
+        playHistoryVideoId: playHistory.videoId,
+        id,
+      });
+      return;
+    }
     
     if (!videoInfo) {
       console.warn('executeAutoPlayFromHistory: videoInfo 未加载，等待加载完成');
+      return;
+    }
+
+    const infoId = videoInfo.id || videoInfo.videoid || videoInfo.vod_id;
+    if (infoId != null && String(infoId) !== String(id)) {
+      console.warn('executeAutoPlayFromHistory: videoInfo 仍是上一支片子，等待刷新', {
+        infoId,
+        id,
+      });
       return;
     }
     
@@ -2755,7 +2812,7 @@ const VideoDetail = () => {
         // 检查该集数是否存在
         const episodeExists = episodes.data.some(ep => {
           const episodeNumber = ep.episode_number || ep.id;
-          return episodeNumber === playHistory.episode;
+          return String(episodeNumber) === String(playHistory.episode);
         });
         
         console.log('executeAutoPlayFromHistory: 检查集数', {
@@ -2766,7 +2823,7 @@ const VideoDetail = () => {
         });
         
         // 放宽条件：即使 selectedEpisode 已设置，如果集数匹配，也允许续播
-        if (episodeExists && (selectedEpisode === null || selectedEpisode === undefined || selectedEpisode === playHistory.episode)) {
+        if (episodeExists && (selectedEpisode === null || selectedEpisode === undefined || String(selectedEpisode) === String(playHistory.episode))) {
           if (hasAutoPlayFromHistoryRef.current) {
             wtvPlayLog('history.autoplay.skipDuplicate', { videoId: id, episode: playHistory.episode });
             return;
@@ -2796,7 +2853,7 @@ const VideoDetail = () => {
       } else {
         console.warn('executeAutoPlayFromHistory: episodes 数据未加载');
       }
-    } else if (!isEpisodeType && playHistory.episode === null) {
+    } else if (!isEpisodeType && (playHistory.episode === null || playHistory.episode === undefined || playHistory.episode === '')) {
       // 电影类型，自动开始播放
       const progress = Number(playHistory.progress) || 0;
       const duration = Number(playHistory.duration) || 0;
@@ -2816,7 +2873,7 @@ const VideoDetail = () => {
         }
       }, 300);
     }
-  }, [videoInfo, episodes.data, selectedEpisode, isMoviePlaying, isEpisodePlaying, handlePlay, handlePlayFromTime, handleMoviePlay, playerRefInternal, playerRef, setIsPlaying]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [id, videoInfo, episodes.data, selectedEpisode, isMoviePlaying, isEpisodePlaying, handlePlay, handlePlayFromTime, handleMoviePlay, playerRefInternal, playerRef, setIsPlaying]); // eslint-disable-line react-hooks/exhaustive-deps
   
   // 从播放记录跳转时，自动选择对应的集数并开始播放
   // 注意：此 useEffect 必须在 executeAutoPlayFromHistory 定义之后
@@ -2825,51 +2882,76 @@ const VideoDetail = () => {
   useEffect(() => {
     // 优先从 location.state 获取播放记录（只有从播放记录列表进入时才会传递）
     let playHistory = location.state?.playHistory;
+    const params = new URLSearchParams(location.search);
+    const fromPlayHistoryQuery = params.get('fromPlayHistory') === 'true';
     
     // 如果没有从 state 获取到，尝试从 Electron API 获取的 videoData 中读取
     // 这是为了支持 Electron 窗口打开的情况（从播放记录列表打开时）
     if (!playHistory && window.electronAPI && window.electronAPI.getVideoData) {
+      let cancelled = false;
       window.electronAPI.getVideoData().then((data) => {
+        if (cancelled) return;
         if (data?.playHistory) {
           const electronPlayHistory = data.playHistory;
+          if (
+            electronPlayHistory.videoId != null &&
+            String(electronPlayHistory.videoId) !== String(id)
+          ) {
+            console.warn('Electron playHistory 与当前 id 不一致，跳过续播', {
+              playHistoryVideoId: electronPlayHistory.videoId,
+              id,
+            });
+            return;
+          }
           console.log('✅ 从 Electron API 获取播放记录（从播放记录列表进入）:', electronPlayHistory);
-          // 如果 videoInfo 已加载，立即执行续播逻辑
-          if (videoInfo && !hasAutoPlayFromHistoryRef.current) {
+          // 如果 videoInfo 已加载且属于当前片子，立即执行续播逻辑
+          const infoId = videoInfo?.id || videoInfo?.videoid || videoInfo?.vod_id;
+          const videoInfoReady = !!videoInfo && (infoId == null || String(infoId) === String(id));
+          if (videoInfoReady && !hasAutoPlayFromHistoryRef.current) {
             console.log('videoInfo 已加载，立即执行续播逻辑（Electron API）');
             executeAutoPlayFromHistory(electronPlayHistory);
           } else {
-            console.log('等待 videoInfo 加载完成（Electron API）...', { hasVideoInfo: !!videoInfo, hasAutoPlayed: hasAutoPlayFromHistoryRef.current });
+            console.log('等待 videoInfo 加载完成（Electron API）...', {
+              hasVideoInfo: !!videoInfo,
+              videoInfoReady,
+              hasAutoPlayed: hasAutoPlayFromHistoryRef.current,
+            });
           }
-        } else {
+        } else if (!fromPlayHistoryQuery) {
           console.log('Electron API 数据中没有 playHistory');
         }
       }).catch(err => {
         console.error('从 Electron API 获取播放记录失败:', err);
       });
-      return; // 等待 Electron API 回调
+      return () => {
+        cancelled = true;
+      };
     }
     
     // 如果没有从 state 或 Electron API 获取到 playHistory，说明不是从播放记录列表进入
     // 不执行续播，但播放时会正常更新播放记录
     if (!playHistory) {
-      console.log('不是从播放记录列表进入，跳过续播（但播放时会更新播放记录）');
-      return;
+      if (!fromPlayHistoryQuery) {
+        console.log('不是从播放记录列表进入，跳过续播（但播放时会更新播放记录）');
+      }
+      return undefined;
     }
     
     if (!videoInfo) {
       console.log('videoInfo 未加载，等待加载完成后再续播');
-      return;
+      return undefined;
     }
     
     if (hasAutoPlayFromHistoryRef.current) {
       console.log('已经处理过续播，跳过');
-      return;
+      return undefined;
     }
     
     // 执行续播逻辑（只有从播放记录列表进入时才会执行到这里）
     console.log('✅ 从播放记录列表进入，准备执行续播逻辑，播放记录:', playHistory);
     executeAutoPlayFromHistory(playHistory);
-  }, [location.state, videoInfo, episodes.data, selectedEpisode, isMoviePlaying, isEpisodePlaying, executeAutoPlayFromHistory]);
+    return undefined;
+  }, [id, location.state, location.search, videoInfo, episodes.data, selectedEpisode, isMoviePlaying, isEpisodePlaying, executeAutoPlayFromHistory]);
   
   // 当 videoInfo 加载完成后，如果之前从 Electron API 获取到了 playHistory，也触发续播
   // 注意：只有从播放记录列表进入时才会执行续播
@@ -2878,6 +2960,16 @@ const VideoDetail = () => {
       window.electronAPI.getVideoData().then((data) => {
         // 只有从播放记录列表进入时（通过 location.state 或 Electron API 传递 playHistory）才续播
         if (data?.playHistory && (location.state?.playHistory || data.playHistory)) {
+          if (
+            data.playHistory.videoId != null &&
+            String(data.playHistory.videoId) !== String(id)
+          ) {
+            return;
+          }
+          const infoId = videoInfo.id || videoInfo.videoid || videoInfo.vod_id;
+          if (infoId != null && String(infoId) !== String(id)) {
+            return;
+          }
           console.log('videoInfo 加载完成，从 Electron API 获取播放记录并续播（从播放记录列表进入）:', data.playHistory);
           executeAutoPlayFromHistory(data.playHistory);
         }
@@ -2885,7 +2977,7 @@ const VideoDetail = () => {
         // 忽略错误，可能已经处理过了
       });
     }
-  }, [videoInfo, executeAutoPlayFromHistory, location.state]);
+  }, [videoInfo, executeAutoPlayFromHistory, location.state, id]);
 
   // 初始化全屏状态
   useEffect(() => {
@@ -2918,8 +3010,8 @@ const VideoDetail = () => {
     };
   }, []);
 
-  // 播放器就绪后，持续同步“文档全屏状态”与“Electron 窗口全屏状态”
-  // 避免出现“窗口全屏残留，导致后续无法正常退出”的情况
+  // 播放器就绪后，同步文档全屏 UI 状态。
+  // 注意：不要在常规路径里调用 Electron setFullScreen，避免与 HTML 全屏互相污染。
   useEffect(() => {
     if (!playerReady) return;
 
@@ -2931,7 +3023,7 @@ const VideoDetail = () => {
         document.msFullscreenElement
       );
 
-      // 切集重建播放器期间：文档全屏节点被销毁属预期，不退出窗口全屏、不改 UI 状态
+      // 切集重建期间文档全屏节点被销毁属预期，保持待恢复意图
       if (suppressFullscreenExitRef.current || pendingRestoreFullscreenRef.current) {
         if (currentlyFullscreen) {
           isFullscreenRef.current = true;
@@ -2940,56 +3032,18 @@ const VideoDetail = () => {
         return;
       }
 
-      if (currentlyFullscreen) {
-        isFullscreenRef.current = true;
-        setIsFullscreen(true);
-        return;
-      }
-
-      // 文档未全屏，但 UI 仍认为全屏：可能是窗口全屏兜底，需核对 Electron 状态
-      if (isFullscreenRef.current && window.electronAPI?.isFullScreen) {
-        window.electronAPI.isFullScreen()
-          .then((isWindowFullscreen) => {
-            if (suppressFullscreenExitRef.current || pendingRestoreFullscreenRef.current) {
-              return;
-            }
-            if (!isWindowFullscreen) {
-              isFullscreenRef.current = false;
-              setIsFullscreen(false);
-            }
-          })
-          .catch(() => {});
-        return;
-      }
-
-      isFullscreenRef.current = false;
-      setIsFullscreen(false);
-
-      // UI 已非全屏时，清理残留窗口全屏
-      if (window.electronAPI?.isFullScreen && window.electronAPI?.setFullScreen) {
-        window.electronAPI.isFullScreen()
-          .then((isWindowFullscreen) => {
-            if (
-              isWindowFullscreen &&
-              !isFullscreenRef.current &&
-              !suppressFullscreenExitRef.current &&
-              !pendingRestoreFullscreenRef.current
-            ) {
-              window.electronAPI.setFullScreen(false).catch(() => {});
-            }
-          })
-          .catch(() => {});
-      }
+      isFullscreenRef.current = currentlyFullscreen;
+      setIsFullscreen(currentlyFullscreen);
     };
 
     const handleEscSync = (event) => {
       if (event.key !== 'Escape') return;
-      // 用户主动 Esc：取消「待恢复全屏」意图
       if (suppressFullscreenExitRef.current || pendingRestoreFullscreenRef.current) {
         pendingRestoreFullscreenRef.current = false;
         suppressFullscreenExitRef.current = false;
       }
-      syncFullscreenState();
+      // Esc 退出后稍后再同步，等 fullscreenchange 落定
+      window.setTimeout(syncFullscreenState, 50);
     };
 
     const syncTimer = window.setInterval(syncFullscreenState, 1200);
@@ -3058,38 +3112,46 @@ const VideoDetail = () => {
       return Promise.reject(new Error('fullscreen-not-supported'));
     };
 
+    // 仅清理「纯窗口全屏残留」。不要在文档全屏进出时顺带 setFullScreen，
+    // 否则会与 HTML Fullscreen API 互相污染，第二次点击变成窗口全屏。
+    const clearResidualWindowFullscreen = async () => {
+      if (!window.electronAPI?.isFullScreen || !window.electronAPI?.setFullScreen) return;
+      try {
+        const isWindowFullscreen = await window.electronAPI.isFullScreen();
+        if (isWindowFullscreen) {
+          await window.electronAPI.setFullScreen(false);
+          await new Promise((resolve) => window.setTimeout(resolve, 80));
+        }
+      } catch (_) {
+        // ignore
+      }
+    };
+
     try {
       const isDocFullscreen = !!getDocFullscreenElement();
+
+      // 正常退出文档全屏：只走 exitFullscreen，绝不调用 setFullScreen
       if (isDocFullscreen) {
-        // 用户主动退出全屏：取消切集后的恢复意图
         pendingRestoreFullscreenRef.current = false;
         suppressFullscreenExitRef.current = false;
         await exitDocFullscreen();
         isFullscreenRef.current = false;
         setIsFullscreen(false);
-        if (window.electronAPI?.setFullScreen) {
-          window.electronAPI.setFullScreen(false).catch(() => {});
-        }
         return;
       }
 
-      if (window.electronAPI?.isFullScreen && window.electronAPI?.setFullScreen) {
-        try {
-          const isWindowFullscreen = await window.electronAPI.isFullScreen();
-          if (isWindowFullscreen) {
-            pendingRestoreFullscreenRef.current = false;
-            suppressFullscreenExitRef.current = false;
-            await window.electronAPI.setFullScreen(false);
-            // 处于“窗口全屏但文档未全屏”的异常状态时，
-            // 本次点击仅用于退出窗口全屏，避免立即再次进入全屏导致无法退出。
-            isFullscreenRef.current = false;
-            setIsFullscreen(false);
-            return;
-          }
-        } catch (_) {
-          // ignore
-        }
+      // UI 认为全屏但文档未全屏：可能是异常窗口全屏残留，清掉即可
+      if (isFullscreenRef.current) {
+        pendingRestoreFullscreenRef.current = false;
+        suppressFullscreenExitRef.current = false;
+        await clearResidualWindowFullscreen();
+        isFullscreenRef.current = false;
+        setIsFullscreen(false);
+        return;
       }
+
+      // 进入文档全屏前，若有纯窗口全屏残留则先清掉，再 requestFullscreen
+      await clearResidualWindowFullscreen();
 
       const videoElement = (() => {
         try {

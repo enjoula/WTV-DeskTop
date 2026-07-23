@@ -1041,6 +1041,8 @@ ipcMain.handle('open-player-window', (event, videoId, videoData, episodeNumber) 
   ) {
     queryParts.push(`autoplayEpisode=${encodeURIComponent(finalEpisodeNumber)}`);
   }
+  // 强制每次打开都变更 search，避免播放窗已在同一 hash 时 React 不刷新视频信息
+  queryParts.push(`_ts=${Date.now()}`);
   const query = queryParts.join('&');
 
   const storedAutoPlayEpisode = resumeFromPlayHistory

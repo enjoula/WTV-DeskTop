@@ -6,7 +6,7 @@
   ],
   "version": "1.0.2",
   "versionCode": 102,
-  "buildDate": "20260714",
+  "buildDate": "20260723",
   "description": "看视频 - WTV Desktop Application",
   "main": "src/main/main.js",
   "scripts": {
@@ -52,7 +52,7 @@
     },
     "afterPack": "build/fix-mac-helper-visibility.js",
     "directories": {
-      "output": "dist/mac/x64"
+      "output": "dist/windows"
     },
     "icon": "build/icons/icon.png",
     "files": [
