@@ -305,6 +305,13 @@ const MyArtPlayer = forwardRef(({
       }
     },
     getInternalPlayer: () => artInstanceRef.current,
+    resize: () => {
+      try {
+        artInstanceRef.current?.resize?.();
+      } catch (_) {
+        // ignore
+      }
+    },
     getVideoElement: () => {
       if (artInstanceRef.current && artInstanceRef.current.video) {
         return artInstanceRef.current.video;
@@ -374,7 +381,9 @@ const MyArtPlayer = forwardRef(({
       hotkey: true,
       pip: true,
       mutex: true,
-      fullscreen: true,
+      // 关闭 ArtPlayer 内置原生全屏（会走 HTML Fullscreen / 窗口全屏）。
+      // 全屏由业务层 CSS 全屏 + 下方自定义按钮接管。
+      fullscreen: false,
       fullscreenWeb: false,
       // 只保留底部主进度条，关闭顶部迷你进度条，避免出现两个进度条
       miniProgressBar: false,
@@ -911,27 +920,23 @@ const MyArtPlayer = forwardRef(({
         }, 100);
       }
 
-      // 接管 ArtPlayer 原生右下角全屏按钮点击：
-      // 保留按钮外观，但统一走业务层 togglePlayerFullscreen，避免 Electron 窗口全屏状态错乱。
+      // 自定义全屏按钮：只走业务层 CSS 全屏，绝不触发 ArtPlayer/HTML 原生全屏
       try {
-        const nativeFullscreenControl = art.controls?.find?.('fullscreen');
-        const nativeFullscreenButton = nativeFullscreenControl?.$ref;
-        if (nativeFullscreenButton) {
-          const hijackNativeFullscreenClick = async (event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            if (typeof event.stopImmediatePropagation === 'function') {
-              event.stopImmediatePropagation();
-            }
+        art.controls.add({
+          name: 'wtv-css-fullscreen',
+          position: 'right',
+          index: 80,
+          html: `<span class="wtv-css-fs-btn">${isFullscreenRef.current ? '退出' : '全屏'}</span>`,
+          tooltip: isFullscreenRef.current ? '退出全屏' : '全屏',
+          click: () => {
             if (onToggleFullscreenRef.current) {
-              await onToggleFullscreenRef.current();
+              onToggleFullscreenRef.current();
             }
-          };
-          nativeFullscreenButton.addEventListener('click', hijackNativeFullscreenClick, true);
-          nativeFullscreenButton._wtvFullscreenHijack = hijackNativeFullscreenClick;
-        }
+            return false;
+          },
+        });
       } catch (e) {
-        console.error('接管原生全屏按钮失败:', e);
+        console.error('添加 CSS 全屏按钮失败:', e);
       }
 
       if (onReadyRef.current) onReadyRef.current();
@@ -949,12 +954,6 @@ const MyArtPlayer = forwardRef(({
     return () => {
       if (artInstanceRef.current && artInstanceRef.current.video) {
         const video = artInstanceRef.current.video;
-        const nativeFullscreenControl = artInstanceRef.current.controls?.find?.('fullscreen');
-        const nativeFullscreenButton = nativeFullscreenControl?.$ref;
-        if (nativeFullscreenButton && nativeFullscreenButton._wtvFullscreenHijack) {
-          nativeFullscreenButton.removeEventListener('click', nativeFullscreenButton._wtvFullscreenHijack, true);
-          delete nativeFullscreenButton._wtvFullscreenHijack;
-        }
         if (video._artPlayerHandlers) {
           Object.entries(video._artPlayerHandlers).forEach(([type, handler]) => {
             video.removeEventListener(type, handler);
@@ -1041,7 +1040,7 @@ const MyArtPlayer = forwardRef(({
     } catch (_) { /* ignore */ }
   }, [autoNextEpisode]);
 
-  // 同步“全屏”设置项提示
+  // 同步“全屏”设置项提示与控制栏图标
   useEffect(() => {
     isFullscreenRef.current = isFullscreen;
     if (!artInstanceRef.current) return;
@@ -1049,6 +1048,13 @@ const MyArtPlayer = forwardRef(({
       const item = artInstanceRef.current.setting?.find?.('wtv-fullscreen');
       if (item) {
         item.tooltip = isFullscreen ? '退出全屏' : '进入全屏';
+      }
+      const control = artInstanceRef.current.controls?.find?.('wtv-css-fullscreen');
+      if (control?.$ref) {
+        control.$ref.innerHTML = `<span class="wtv-css-fs-btn">${isFullscreen ? '退出' : '全屏'}</span>`;
+      }
+      if (control) {
+        control.tooltip = isFullscreen ? '退出全屏' : '全屏';
       }
     } catch (_) { /* ignore */ }
   }, [isFullscreen]);

@@ -1104,6 +1104,33 @@ ipcMain.handle('open-player-window', (event, videoId, videoData, episodeNumber) 
     playerWindow.setMenuBarVisibility(false);
   }
 
+  const notifyPlayerFullscreen = (isFull) => {
+    if (!playerWindow || playerWindow.isDestroyed()) return;
+    playerWindow.webContents.send('fullscreen-changed', !!isFull);
+  };
+  playerWindow.on('enter-full-screen', () => {
+    // 全屏期间必须可缩放，否则 macOS 无法把窗口铺满屏幕
+    try {
+      playerWindow.setResizable(true);
+    } catch (_) {
+      // ignore
+    }
+    notifyPlayerFullscreen(true);
+  });
+  playerWindow.on('leave-full-screen', () => {
+    notifyPlayerFullscreen(false);
+    // 退出全屏是异步的，稍后再锁回不可缩放
+    setTimeout(() => {
+      if (!playerWindow || playerWindow.isDestroyed()) return;
+      if (playerWindow.isFullScreen()) return;
+      try {
+        playerWindow.setResizable(false);
+      } catch (_) {
+        // ignore
+      }
+    }, 120);
+  });
+
   playerWindow.on('closed', () => {
     playerWindow = null;
     currentPlayerVideoData = null;
@@ -1453,11 +1480,23 @@ ipcMain.handle('is-full-screen', (event) => {
 });
 
 // 设置窗口全屏状态
+// macOS + resizable:false 时，直接 setFullScreen 会出现「进了全屏空间但窗口仍保持原尺寸」
+// （第二次全屏尤其明显）。进入前临时 setResizable(true)，退出后再由 leave-full-screen 恢复。
 ipcMain.handle('set-full-screen', (event, flag) => {
   const senderWindow = BrowserWindow.fromWebContents(event.sender);
-  if (senderWindow && !senderWindow.isDestroyed()) {
-    senderWindow.setFullScreen(flag);
-    return true;
+  if (!senderWindow || senderWindow.isDestroyed()) {
+    return false;
   }
-  return false;
+
+  if (flag) {
+    try {
+      senderWindow.setResizable(true);
+    } catch (_) {
+      // ignore
+    }
+    senderWindow.setFullScreen(true);
+  } else {
+    senderWindow.setFullScreen(false);
+  }
+  return true;
 });

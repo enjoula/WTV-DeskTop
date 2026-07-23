@@ -36,6 +36,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   isFullScreen: () => ipcRenderer.invoke('is-full-screen'),
   setFullScreen: (flag) => ipcRenderer.invoke('set-full-screen', flag),
+  /** 窗口进入/退出系统全屏时同步到渲染进程 */
+  onFullscreenChanged: (callback) => {
+    const handler = (_event, isFull) => callback(!!isFull);
+    ipcRenderer.on('fullscreen-changed', handler);
+    return () => {
+      ipcRenderer.removeListener('fullscreen-changed', handler);
+    };
+  },
   /** 渲染进程日志转发到主进程终端（开发时搜 WTV_PLAY_LOG） */
   wtvRendererLog: (tag, payload) => {
     try {

@@ -4960,6 +4960,60 @@ video:focus-visible {
   max-width: 100% !important;
 }
 
+/* 系统全屏时：播放器铺满窗口内容区（配合 Electron setFullScreen） */
+.video-detail-player-overlay.is-css-fullscreen {
+  position: fixed !important;
+  inset: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  max-height: none !important;
+  min-height: 0 !important;
+  z-index: 9999 !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  background: #000 !important;
+  display: flex !important;
+  align-items: stretch !important;
+  justify-content: stretch !important;
+  overflow: hidden !important;
+  pointer-events: auto !important;
+  order: unset !important;
+}
+
+.video-detail-player-overlay.is-css-fullscreen .player-ui-shell {
+  width: 100% !important;
+  max-width: none !important;
+  height: 100% !important;
+  margin: 0 !important;
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: stretch !important;
+}
+
+.video-detail-player-overlay.is-css-fullscreen .video-player-container-inline {
+  width: 100% !important;
+  max-width: none !important;
+  height: 100% !important;
+  min-height: 0 !important;
+  max-height: none !important;
+  aspect-ratio: auto !important;
+  border-radius: 0 !important;
+  border: none !important;
+  box-shadow: none !important;
+  overflow: hidden !important;
+}
+
+.video-detail-player-overlay.is-css-fullscreen .video-player-container-inline > div,
+.video-detail-player-overlay.is-css-fullscreen .art-video-player,
+.video-detail-player-overlay.is-css-fullscreen .art-video,
+.video-detail-player-overlay.is-css-fullscreen .art-video video,
+.video-detail-player-overlay.is-css-fullscreen video {
+  width: 100% !important;
+  height: 100% !important;
+  max-width: none !important;
+  max-height: none !important;
+}
+
 .video-detail-content-new.playing-mode .video-detail-player-section video,
 .video-detail-content-new.playing-mode .video-detail-player-section.player-expanded video,
 .video-detail-content-new.playing-mode .video-detail-player-section .video-player-container-inline video,
