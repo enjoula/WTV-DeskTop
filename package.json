@@ -52,7 +52,7 @@
     },
     "afterPack": "build/fix-mac-helper-visibility.js",
     "directories": {
-      "output": "dist/windows"
+      "output": "dist/mac/x64"
     },
     "icon": "build/icons/icon.png",
     "files": [
