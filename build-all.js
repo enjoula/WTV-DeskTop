@@ -57,17 +57,18 @@ function buildReact() {
 }
 
 function getArchFromPlatform(platform) {
-  // 例如: mac-x64 / mac-arm64 / linux-x64
+  // 例如: Mac-X64 / Mac-Arm64 / Linux-X64
+  // electron-builder 与输出目录使用小写 arch（x64 / arm64）
   const parts = String(platform).split('-');
-  return parts.length >= 2 ? parts[1] : null;
+  return parts.length >= 2 ? parts[1].toLowerCase() : null;
 }
 
 function isMacPlatform(platform) {
-  return String(platform).startsWith('mac-');
+  return String(platform).startsWith('Mac-');
 }
 
 function isLinuxPlatform(platform) {
-  return String(platform).startsWith('linux-');
+  return String(platform).startsWith('Linux-');
 }
 
 function restrictArchInBuildConfig(packageJson, platformKey, arch) {
@@ -86,7 +87,7 @@ function restrictArchInBuildConfig(packageJson, platformKey, arch) {
   }
 }
 
-// 打包函数（支持 windows / mac-x64 / mac-arm64 / linux-x64）
+// 打包函数（支持 Windows / Mac-X64 / Mac-Arm64 / Linux-X64）
 function build(platform) {
   log(`\n📦 开始打包 ${platform} ...`, 'blue');
 
@@ -94,22 +95,19 @@ function build(platform) {
   let originalPackageJson = null;
 
   try {
-    // 设置输出目录 & 打包命令
-    let outputDir = 'dist/windows';
+    // 输出目录与平台名一致：dist/Mac-X64、dist/Mac-Arm64、dist/Windows、dist/Linux-X64
+    let outputDir = path.join('dist', platform);
     let command = 'electron-builder --win --x64';
 
     if (isMacPlatform(platform)) {
       const arch = getArchFromPlatform(platform);
-      if (!arch) throw new Error(`无法识别 mac 架构: ${platform}`);
-      outputDir = path.join('dist', 'mac', arch);
+      if (!arch) throw new Error(`无法识别 Mac 架构: ${platform}`);
       command = `electron-builder --mac --${arch}`;
     } else if (isLinuxPlatform(platform)) {
       const arch = getArchFromPlatform(platform);
-      if (!arch) throw new Error(`无法识别 linux 架构: ${platform}`);
-      outputDir = path.join('dist', 'ubuntu', arch);
+      if (!arch) throw new Error(`无法识别 Linux 架构: ${platform}`);
       command = `electron-builder --linux --${arch}`;
-    } else if (platform === 'windows') {
-      outputDir = 'dist/windows';
+    } else if (platform === 'Windows') {
       command = 'electron-builder --win --x64';
     } else {
       throw new Error(`未知平台: ${platform}`);
@@ -207,11 +205,15 @@ function cleanMacUnpackedApps(outputDir) {
 }
 
 // 清理 Windows 打包过程中生成的中间目录，保留安装包与压缩包
-function cleanWindowsIntermediateDirs() {
+function cleanWindowsIntermediateDirs(outputDir = path.join('dist', 'Windows')) {
+  const absoluteOutputDir = path.isAbsolute(outputDir)
+    ? outputDir
+    : path.join(process.cwd(), outputDir);
+
   const windowsIntermediateDirs = [
-    path.join(process.cwd(), 'dist', 'windows', 'win-unpacked'),
-    path.join(process.cwd(), 'dist', 'windows', 'builder-debug.yml'),
-    path.join(process.cwd(), 'dist', 'windows', 'builder-effective-config.yaml'),
+    path.join(absoluteOutputDir, 'win-unpacked'),
+    path.join(absoluteOutputDir, 'builder-debug.yml'),
+    path.join(absoluteOutputDir, 'builder-effective-config.yaml'),
   ];
 
   let cleanedCount = 0;
@@ -316,13 +318,13 @@ function main() {
     // 打包
     const platforms = [];
     if (onlyMac) {
-      platforms.push('mac-arm64','mac-x64');
+      platforms.push('Mac-Arm64', 'Mac-X64');
     } else if (onlyWin) {
-      platforms.push('windows');
+      platforms.push('Windows');
     } else if (onlyUbuntu) {
-      platforms.push('linux-x64');
+      platforms.push('Linux-X64');
     } else {
-      platforms.push('mac-x64', 'mac-arm64', 'windows', 'linux-x64');
+      platforms.push('Mac-X64', 'Mac-Arm64', 'Windows', 'Linux-X64');
     }
     
     const successfulPlatforms = [];
@@ -334,14 +336,13 @@ function main() {
         successfulPlatforms.push(platform);
 
         // 每个平台成功后立即清理自己的中间目录，避免因其他平台失败而跳过清理
-        if (platform === 'windows') {
-          cleanWindowsIntermediateDirs();
+        const outputDir = path.join('dist', platform);
+        if (platform === 'Windows') {
+          cleanWindowsIntermediateDirs(outputDir);
         } else if (isMacPlatform(platform)) {
-          const arch = getArchFromPlatform(platform);
-          cleanMacUnpackedApps(path.join('dist', 'mac', arch));
+          cleanMacUnpackedApps(outputDir);
         } else if (isLinuxPlatform(platform)) {
-          const arch = getArchFromPlatform(platform);
-          cleanLinuxIntermediateDirs(path.join('dist', 'ubuntu', arch));
+          cleanLinuxIntermediateDirs(outputDir);
         }
       } catch (error) {
         failedPlatforms.push(platform);
@@ -361,10 +362,10 @@ function main() {
     }
     
     log('\n📁 输出目录:', 'bright');
-    log('  - Mac(x64): dist/mac/x64/', 'blue');
-    log('  - Mac(arm64): dist/mac/arm64/', 'blue');
-    log('  - Windows: dist/windows/', 'blue');
-    log('  - Ubuntu(x64): dist/ubuntu/x64/', 'blue');
+    log('  - Mac-X64: dist/Mac-X64/', 'blue');
+    log('  - Mac-Arm64: dist/Mac-Arm64/', 'blue');
+    log('  - Windows: dist/Windows/', 'blue');
+    log('  - Linux-X64: dist/Linux-X64/', 'blue');
     
     if (failedPlatforms.length > 0) {
       process.exit(1);

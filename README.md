@@ -97,9 +97,10 @@ WTV-DeskTop/
 ├── build/                    # 构建资源
 │   └── logo.svg             # 应用图标
 ├── dist/                     # 打包输出目录（构建产物，不提交）
-│   ├── mac/                 # Mac 平台打包文件（build:all / build:mac）
-│   ├── windows/             # Windows 平台打包文件（build:all / build:win）
-│   └── ubuntu/              # Ubuntu 平台打包文件（build:all / build:ubuntu）
+│   ├── Mac-X64/             # Mac Intel 打包文件（build:all / build:mac）
+│   ├── Mac-Arm64/           # Mac Apple Silicon 打包文件（build:all / build:mac）
+│   ├── Windows/             # Windows 平台打包文件（build:all / build:win）
+│   └── Linux-X64/           # Linux 平台打包文件（build:all / build:ubuntu）
 ├── build-all.js             # 一键打包脚本
 ├── package.json             # 项目配置文件
 └── README.md               # 项目文档
@@ -223,7 +224,7 @@ npm run build:all
 1. ✅ 自动清理上次的构建缓存（dist、React build、node_modules/.cache 等）
 2. ✅ 自动构建 React 应用
 3. ✅ 分别打包 Mac / Windows / Ubuntu 平台
-4. ✅ 输出文件分别放到 `dist/mac/`、`dist/windows/` 和 `dist/ubuntu/` 目录
+4. ✅ 输出文件分别放到 `dist/Mac-X64/`、`dist/Mac-Arm64/`、`dist/Windows/` 和 `dist/Linux-X64/` 目录
 
 ### 单独打包
 
@@ -244,14 +245,11 @@ npm run build:ubuntu
 
 ```
 dist/
-├── mac/                    # Mac 平台输出
-│   ├── x64/                # Intel Mac 安装包/应用目录
-│   └── arm64/              # Apple Silicon Mac 安装包/应用目录
-└── windows/                # Windows 平台输出
-    ├── WTV Setup 1.0.0.exe # Windows 安装程序
-    └── win-unpacked/       # 未打包的应用目录
-└── ubuntu/                 # Ubuntu 平台输出
-    └── x64/                # AppImage 安装包/应用目录
+├── Mac-X64/                # Intel Mac 安装包
+├── Mac-Arm64/              # Apple Silicon Mac 安装包
+├── Windows/                # Windows 平台输出
+│   └── WTV Setup 1.0.0.exe # Windows 安装程序
+└── Linux-X64/              # Linux AppImage 安装包
 ```
 
 ### 打包配置
