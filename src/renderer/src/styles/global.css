@@ -351,46 +351,40 @@ body {
 }
 
 .video-detail-description {
+  position: relative;
   margin-top: 4px;
 }
 
+/* 截断由 JS 计算（保证「更多」紧跟在第三行文本末尾），这里不使用 line-clamp 省略号 */
 .description-text {
+  margin: 0;
   color: rgba(255, 255, 255, 0.95);
   line-height: 1.8;
   font-size: 15px;
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
+  text-indent: 2em;
   word-break: break-word;
-  max-height: 5.4em;
-  transition: max-height 1.2s cubic-bezier(0.25, 1, 0.5, 1), 
-              opacity 0.5s ease;
-  will-change: max-height;
   /* 增强文字阴影 */
   text-shadow: 0 1px 8px rgba(0, 0, 0, 0.9);
 }
 
-.description-text.expanded {
-  -webkit-line-clamp: 100; /* 允许显示更多行，配合 max-height 过渡 */
-  max-height: 2000px; /* 足够大的值以便展开 */
+.description-text.description-measure {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  visibility: hidden;
+  pointer-events: none;
 }
 
-.description-toggle {
-  margin-top: 6px;
-  background: #ff4757;
-  color: #fff;
-  border: none;
-  border-radius: 10px;
-  padding: 6px 12px;
-  cursor: pointer;
-  font-size: 13px;
-  transition: opacity 0.2s, transform 0.2s;
-}
-
-.description-toggle:hover {
-  opacity: 0.9;
-  transform: translateY(-1px);
+/* 外观复用 .more-actors-link，这里只处理行内排版：前面已有空格，不留左边距；
+   胶囊比行高略高，用负的上下外边距避免撑高所在行 */
+.description-text .description-toggle {
+  margin: -4px 0;
+  font-family: inherit;
+  line-height: 1.2;
+  text-indent: 0;
+  text-shadow: none;
+  vertical-align: middle;
 }
 
 /* 剧集筛选与网格 */
@@ -596,6 +590,20 @@ body {
 
 .main-content::-webkit-scrollbar {
   display: none; /* Chrome, Safari, Edge */
+}
+
+html.wtv-popup-window .app-header,
+html.wtv-popup-window .app-footer {
+  display: none !important;
+}
+
+html.wtv-popup-window .app-container {
+  padding-top: 12px;
+  padding-bottom: 0;
+}
+
+html.wtv-popup-window .main-content {
+  padding: 12px 20px 20px;
 }
 
 /* 新窗口（无 header/footer）场景：尽量贴近顶部，去掉全局留白 */
@@ -2950,12 +2958,7 @@ video::-webkit-media-controls-volume-slider * {
   overflow: hidden;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
   transition: transform 0.3s;
-  background-color: #f0f0f0;
-  -webkit-font-smoothing: subpixel-antialiased;
-  -moz-osx-font-smoothing: auto;
-  transform: translateZ(0);
-  -webkit-transform: translateZ(0);
-  will-change: transform;
+  background-color: #1c1c1c;
 }
 
 .video-poster .video-rating-overlay {
@@ -3553,17 +3556,6 @@ video:focus-visible {
   height: 100% !important;
   object-fit: cover;
   object-position: center;
-  image-rendering: auto;
-  image-rendering: -webkit-optimize-contrast;
-  -ms-interpolation-mode: bicubic;
-  transform: translateZ(0);
-  -webkit-backface-visibility: hidden;
-  backface-visibility: hidden;
-  -webkit-transform: translateZ(0);
-  will-change: transform;
-  -webkit-font-smoothing: subpixel-antialiased;
-  -moz-osx-font-smoothing: auto;
-  filter: none;
   z-index: 1;
 }
 

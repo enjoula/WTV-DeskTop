@@ -21,6 +21,8 @@ import StarRating from '../components/StarRating';
 import { toggleFavorite } from '../api/user';
 import { logoutUser } from '../store/authSlice';
 import { showCenterTip } from '../utils/tips';
+import { silenceAllPageMedia, stopMediaElement } from '../utils/mediaCleanup';
+import { HLS_LOCK_HIGHEST_CONFIG, lockHlsHighestLevel } from '../utils/hlsQuality';
 import { getVideoPlayHistory, updatePlayProgress } from '../utils/playHistory';
 import { getPlayerSettings, updatePlayerSetting } from '../utils/playerSettings';
 import { PlaybackController } from '../utils/playbackController';
@@ -36,6 +38,31 @@ function wtvPlayLog(tag, payload) {
   } catch (_) {
     /* ignore */
   }
+}
+
+function pickSeededVideoData(videoId) {
+  if (videoId == null) return null;
+  const matches = (data) => {
+    if (!data) return false;
+    const candidates = [data.id, data.videoid, data.vod_id, data.playHistory?.videoId];
+    return candidates.some((item) => item != null && String(item) === String(videoId));
+  };
+  try {
+    const syncData = window.electronAPI?.getVideoDataSync?.();
+    if (matches(syncData)) return syncData;
+  } catch (_) { /* ignore */ }
+  try {
+    if (matches(window.__WTV_INITIAL_VIDEO_DATA__)) return window.__WTV_INITIAL_VIDEO_DATA__;
+  } catch (_) { /* ignore */ }
+  return null;
+}
+
+const DESCRIPTION_MAX_LINES = 3;
+
+/** 去掉简介首尾空白（含全角空格），首行缩进由样式统一处理 */
+function normalizeDescription(description) {
+  if (typeof description !== 'string') return '';
+  return description.replace(/^[\s\u3000]+/, '').replace(/[\s\u3000]+$/, '');
 }
 
 const VideoDetail = () => {
@@ -62,10 +89,11 @@ const VideoDetail = () => {
   const { isAuthenticated } = useSelector(state => state.auth);
   const [selectedEpisode, setSelectedEpisode] = useState(null);
   const [isFavorite, setIsFavorite] = useState(false);
-  const [videoInfo, setVideoInfo] = useState(null);
+  const [videoInfo, setVideoInfo] = useState(() => pickSeededVideoData(id));
   // 从用户设置中初始化播放器状态
+  // 倍速只对当前这部电影/剧集生效，不读全局持久化（换片默认 1x）
   const playerSettings = getPlayerSettings();
-  const [playbackRate, setPlaybackRate] = useState(playerSettings.playbackRate);
+  const [playbackRate, setPlaybackRate] = useState(1);
   const [playedSeconds, setPlayedSeconds] = useState(0);
   const [duration, setDuration] = useState(0); // 视频总时长（秒）
   const [activeSeason, setActiveSeason] = useState(1);
@@ -83,7 +111,7 @@ const VideoDetail = () => {
   const [isEpisodePlaying, setIsEpisodePlaying] = useState(false); // 电视剧/动漫/综艺/纪录片是否正在播放
   const [playerReady, setPlayerReady] = useState(false); // 播放器是否准备好
   const [showFullDescription, setShowFullDescription] = useState(false); // 简介展开状态
-  const [isDescriptionOverflow, setIsDescriptionOverflow] = useState(false); // 简介是否超过3行
+  const [truncatedDescription, setTruncatedDescription] = useState(null); // 简介超过3行时截断后的文本，null 表示无需截断
   const [videoLoadError, setVideoLoadError] = useState(null); // 视频加载错误
   const [videoLoadTimeout, setVideoLoadTimeout] = useState(false); // 视频加载超时
   const [videoFitMode, setVideoFitMode] = useState(() => {
@@ -102,7 +130,9 @@ const VideoDetail = () => {
   const seekProtectionEndTimeRef = useRef(0); // 🔧 拖动保护期结束时间（毫秒），在此时间之前忽略所有播放/暂停事件
   const playerRef = useRef(null);
   const playerRefInternal = useRef(null); // ReactPlayer 的 ref
-  const descriptionRef = useRef(null); // 简介文本的 ref
+  const [descriptionMeasureEl, setDescriptionMeasureEl] = useState(null); // 简介测量节点（隐藏）
+  const descriptionMeasureTextRef = useRef(null);
+  const descriptionMeasureToggleRef = useRef(null);
   const isPlayingRef = useRef(false); // 使用 ref 来跟踪实际的播放状态，避免状态冲突
   const hasSkippedRef = useRef(false); // 跟踪是否已经执行过快进，避免重复快进
   const hasAutoPlayFromHistoryRef = useRef(false); // 跟踪是否已经从播放记录自动播放
@@ -626,10 +656,18 @@ const VideoDetail = () => {
 
   // 当视频ID变化时，重置播放状态与视频信息，避免播放窗复用时残留上一支片子
   useEffect(() => {
+    // 立刻掐掉上一支的画面+声音（React 卸载可能晚于新片起播）
+    silenceAllPageMedia();
+    try {
+      const currentVideo = playerRefInternal.current?.getVideoElement?.();
+      if (currentVideo) stopMediaElement(currentVideo);
+    } catch (_) { /* ignore */ }
+
     // 🎮 重置控制器状态
     controller.reset();
 
-    setVideoInfo(null);
+    const seeded = pickSeededVideoData(id);
+    setVideoInfo(seeded ? normalizeVideoInfo(seeded) : null);
     setIsMoviePlaying(false);
     setIsEpisodePlaying(false);
     setPlayerReady(false);
@@ -643,6 +681,18 @@ const VideoDetail = () => {
     resumeTimeRef.current = null;
     pendingAutoPlayEpisodeRef.current = null;
     dispatch(clearPlayUrl());
+  }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    const applySeed = (data) => {
+      if (!data) return;
+      const candidates = [data.id, data.videoid, data.vod_id, data.playHistory?.videoId];
+      if (!candidates.some((item) => item != null && String(item) === String(id))) return;
+      setVideoInfo(normalizeVideoInfo(data));
+    };
+    const onSeed = (event) => applySeed(event?.detail);
+    window.addEventListener('wtv-video-data', onSeed);
+    return () => window.removeEventListener('wtv-video-data', onSeed);
   }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 监听视频显示模式变化，应用到视频元素
@@ -709,6 +759,15 @@ const VideoDetail = () => {
   const currentPlaybackRateRef = useRef(playbackRate);
   // 使用 ref 标记是否正在同步设置到视频元素，避免循环触发
   const isSyncingSettingsRef = useRef(false);
+
+  // 换片恢复正常倍速；同一部剧连播下一集（id 不变）则保留用户设置的倍速
+  useEffect(() => {
+    setPlaybackRate(1);
+    currentPlaybackRateRef.current = 1;
+    try {
+      playerRefInternal.current?.setPlaybackRate?.(1);
+    } catch (_) { /* ignore */ }
+  }, [id]);
   
   // 同步 ref 值到 state（当 state 从外部更新时）
   useEffect(() => {
@@ -749,7 +808,10 @@ const VideoDetail = () => {
           // 使用当前的 state 值，这些值已经包含了用户的调整
           videoElement.volume = volume;
           videoElement.muted = muted;
-          videoElement.playbackRate = playbackRate;
+          // 倍速交给 MyArtPlayer 缓冲门控，避免连播下一集立刻高倍速卡死
+          if (playerRefInternal.current?.setPlaybackRate) {
+            playerRefInternal.current.setPlaybackRate(playbackRate);
+          }
           
           // 同步更新 ref
           currentVolumeRef.current = volume;
@@ -831,16 +893,14 @@ const VideoDetail = () => {
         setIsPlaying(false);
         isPlayingRef.current = false;
 
-        // 销毁 HLS 实例、暂停 video
+        silenceAllPageMedia();
+        try {
+          const videoFromRef = playerRefInternal.current?.getVideoElement?.();
+          if (videoFromRef) stopMediaElement(videoFromRef);
+        } catch (_) { /* ignore */ }
         const videoElement = playerRef.current?.wrapper?.querySelector('video');
         if (videoElement) {
-          if (videoElement.hls && typeof videoElement.hls.destroy === 'function') {
-            videoElement.hls.destroy();
-            videoElement.hls = null;
-          }
-          if (!videoElement.paused) {
-            videoElement.pause();
-          }
+          stopMediaElement(videoElement);
         }
       } catch (e) {
         console.warn('清理播放器资源时出错:', e);
@@ -1040,7 +1100,7 @@ const VideoDetail = () => {
                   backBufferLength: 90,
                   maxBufferLength: 600, // 增加最大缓冲长度到600秒，确保音频流畅
                   maxMaxBufferLength: 600, // 增加最大缓冲长度上限到600秒
-                  startLevel: -1, // 自动选择最佳质量
+                  ...HLS_LOCK_HIGHEST_CONFIG,
                   maxBufferSize: 600 * 1000 * 1000, // 最大缓冲大小 600MB（对应600秒视频）
                   maxBufferHole: 0.5, // 允许的最大缓冲间隙（秒）
                   highBufferWatchdogPeriod: 2, // 高缓冲监控周期（秒）
@@ -1056,6 +1116,7 @@ const VideoDetail = () => {
                 hls.attachMedia(videoElement);
                 
                 hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                  lockHlsHighestLevel(hls);
                   console.log('HLS manifest 解析完成，可以播放');
                   if (videoElement.paused && !isSeekingRef.current && document.contains(videoElement) && !userPausedRef.current && (isPlaying || isPlayingRef.current)) {
                     videoElement.play().catch(err => {
@@ -1257,37 +1318,61 @@ const VideoDetail = () => {
     }
   }, [videoInfo, currentCategory, dispatch]);
 
+  const descriptionText = normalizeDescription(videoInfo?.description);
+
   useEffect(() => {
-    // 检查简介是否超过3行
-    const checkOverflow = () => {
-      if (descriptionRef.current) {
-        const element = descriptionRef.current;
-        // 计算是否溢出：scrollHeight 是内容总高度，offsetHeight 是可见高度（被限制在3行）
-        // 增加一点缓冲 2px
-        const isOverflow = element.scrollHeight > element.offsetHeight + 2;
-        console.log('简介溢出检查:', {
-          scrollHeight: element.scrollHeight,
-          offsetHeight: element.offsetHeight,
-          isOverflow
-        });
-        setIsDescriptionOverflow(isOverflow);
+    // 简介超过3行时，计算能放下「截断文本 + 空格 + 更多」的最长文本
+    const measureEl = descriptionMeasureEl;
+    const measureTextEl = descriptionMeasureTextRef.current;
+    const measureToggleEl = descriptionMeasureToggleRef.current;
+    if (!descriptionText || !measureEl || !measureTextEl || !measureToggleEl) {
+      setTruncatedDescription(null);
+      return undefined;
+    }
+
+    let lastWidth = -1;
+    const computeTruncation = () => {
+      const width = measureEl.clientWidth;
+      if (!width || width === lastWidth) return;
+      lastWidth = width;
+
+      const lineHeight = parseFloat(window.getComputedStyle(measureEl).lineHeight) || 27;
+      const maxHeight = lineHeight * (DESCRIPTION_MAX_LINES + 0.5);
+      const fits = () => measureEl.offsetHeight <= maxHeight;
+
+      measureToggleEl.style.display = 'none';
+      measureTextEl.textContent = descriptionText;
+      if (fits()) {
+        setTruncatedDescription(null);
+        return;
       }
+
+      measureToggleEl.style.display = '';
+      const chars = Array.from(descriptionText);
+      let low = 0;
+      let high = chars.length;
+      while (low < high) {
+        const mid = Math.ceil((low + high) / 2);
+        measureTextEl.textContent = `${chars.slice(0, mid).join('').trimEnd()} `;
+        if (fits()) {
+          low = mid;
+        } else {
+          high = mid - 1;
+        }
+      }
+      setTruncatedDescription(chars.slice(0, low).join('').trimEnd());
     };
 
-    // 初始检查
-    checkOverflow();
+    computeTruncation();
 
-    // 在窗口大小变化时重新检查
-    window.addEventListener('resize', checkOverflow);
-    
-    // 如果是剧集，在切换集数或获取新数据后也检查
-    const timer = setTimeout(checkOverflow, 100);
-
-    return () => {
-      window.removeEventListener('resize', checkOverflow);
-      clearTimeout(timer);
-    };
-  }, [videoInfo?.description, id]);
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', computeTruncation);
+      return () => window.removeEventListener('resize', computeTruncation);
+    }
+    const resizeObserver = new ResizeObserver(computeTruncation);
+    resizeObserver.observe(measureEl);
+    return () => resizeObserver.disconnect();
+  }, [descriptionText, descriptionMeasureEl]);
 
   useEffect(() => {
     // 进入详情页或切换视频时，强制滚动到顶部
@@ -3084,11 +3169,12 @@ const VideoDetail = () => {
   }, []);
 
   // 统一持久化播放设置：确保关闭前最后状态可恢复
+  // 倍速不写全局：只对当前电影/剧集会话有效，换片默认 1x
   useEffect(() => {
     const persistSettings = () => {
       updatePlayerSetting('volume', volume);
       updatePlayerSetting('muted', muted);
-      updatePlayerSetting('playbackRate', playbackRate);
+      updatePlayerSetting('playbackRate', 1);
       updatePlayerSetting('videoFitMode', videoFitMode);
       updatePlayerSetting('autoNextEpisode', autoNextEpisode);
     };
@@ -3104,7 +3190,7 @@ const VideoDetail = () => {
       window.removeEventListener('pagehide', persistSettings);
       persistSettings();
     };
-  }, [volume, muted, playbackRate, videoFitMode, autoNextEpisode]);
+  }, [volume, muted, videoFitMode, autoNextEpisode]);
 
   // 处理点击推荐视频，在新窗口打开视频详情页
   const handleRelatedVideoClick = async (e, video) => {
@@ -3613,22 +3699,38 @@ const VideoDetail = () => {
             )}
             
             {/* 简介折叠 */}
-            {videoInfo.description && (
+            {descriptionText && (
               <div className="video-detail-description">
-                <p 
-                  className={`description-text ${showFullDescription ? 'expanded' : ''}`}
-                  ref={descriptionRef}
-                >
-                  {videoInfo.description}
+                <p className={`description-text ${showFullDescription ? 'expanded' : ''}`}>
+                  {showFullDescription || truncatedDescription === null ? descriptionText : truncatedDescription}
+                  {truncatedDescription !== null && (
+                    <>
+                      {' '}
+                      <button
+                        type="button"
+                        className="more-actors-link description-toggle"
+                        onClick={() => setShowFullDescription(!showFullDescription)}
+                      >
+                        {showFullDescription ? '收起' : '更多'}
+                      </button>
+                    </>
+                  )}
                 </p>
-                {(isDescriptionOverflow || showFullDescription) && (
+                <p
+                  className="description-text description-measure"
+                  ref={setDescriptionMeasureEl}
+                  aria-hidden="true"
+                >
+                  <span ref={descriptionMeasureTextRef} />
                   <button
-                    className="description-toggle"
-                    onClick={() => setShowFullDescription(!showFullDescription)}
+                    type="button"
+                    ref={descriptionMeasureToggleRef}
+                    className="more-actors-link description-toggle"
+                    tabIndex={-1}
                   >
-                    {showFullDescription ? '收起' : '更多'}
+                    更多
                   </button>
-                )}
+                </p>
               </div>
             )}
             </div>
@@ -3916,7 +4018,7 @@ const VideoDetail = () => {
               if (Math.abs(currentPlaybackRateRef.current - newRate) > 0.01) {
                 currentPlaybackRateRef.current = newRate;
                 setPlaybackRate(newRate);
-                updatePlayerSetting('playbackRate', newRate);
+                // 倍速仅作用于当前这部电影/剧集，不写入全局设置
               }
             }}
             onReady={() => {
@@ -3973,7 +4075,10 @@ const VideoDetail = () => {
                           // 使用当前的 state 值，这些值已经包含了用户的调整
                           videoElement.volume = volume;
                           videoElement.muted = muted;
-                          videoElement.playbackRate = playbackRate;
+                          // 倍速交给 MyArtPlayer 缓冲门控（切集/高倍速先攒缓冲）
+                          if (playerRefInternal.current?.setPlaybackRate) {
+                            playerRefInternal.current.setPlaybackRate(playbackRate);
+                          }
                           
                           // 同步更新 ref，避免事件监听误判
                           currentVolumeRef.current = volume;
@@ -4011,7 +4116,9 @@ const VideoDetail = () => {
                             isSyncingSettingsRef.current = true;
                             videoElement.volume = volume;
                             videoElement.muted = muted;
-                            videoElement.playbackRate = playbackRate;
+                            if (playerRefInternal.current?.setPlaybackRate) {
+                              playerRefInternal.current.setPlaybackRate(playbackRate);
+                            }
                             currentVolumeRef.current = volume;
                             currentMutedRef.current = muted;
                             currentPlaybackRateRef.current = playbackRate;
@@ -4069,44 +4176,18 @@ const VideoDetail = () => {
                       }, 300); // 300ms 防抖延迟，只用于保存设置
                     };
                     
-                    // 监听播放速度变化
-                    const onRateChange = () => {
-                      // 如果正在同步设置，忽略事件（避免循环）
-                      if (isSyncingSettingsRef.current) {
-                        return;
-                      }
-
-                      const newRate = videoElement.playbackRate;
-                      
-                      // 如果值没有变化，忽略（可能是我们刚刚设置的）
-                      if (Math.abs(currentPlaybackRateRef.current - newRate) < 0.01) {
-                        return;
-                      }
-                      
-                      console.log('检测到播放速度变化:', { rate: newRate, prevRate: currentPlaybackRateRef.current });
-                      
-                      // 更新 ref（先更新 ref，再更新 state，避免循环）
-                      currentPlaybackRateRef.current = newRate;
-                      
-                      // 立即更新 state，确保 UI 同步
-                      setPlaybackRate(newRate);
-                      
-                      // 延迟保存设置，避免频繁保存
-                      setTimeout(() => {
-                      updatePlayerSetting('playbackRate', newRate);
-                      }, 300);
-                    };
+                    // 播放速度以 MyArtPlayer 的 onRateChange 为准。
+                    // 不要监听 video.ratechange 写回 state：缓冲门控会临时把实际倍速降到 1x，
+                    // 若这里同步会把用户目标倍速（如 2x）错误覆盖成 1x。
                     
                     videoElement.addEventListener('volumechange', onVolumeChange);
-                    videoElement.addEventListener('ratechange', onRateChange);
                     
                     // 保存事件监听器引用
                     if (!videoElement._eventListeners) {
                       videoElement._eventListeners = [];
                     }
                     videoElement._eventListeners.push(
-                      { type: 'volumechange', handler: onVolumeChange },
-                      { type: 'ratechange', handler: onRateChange }
+                      { type: 'volumechange', handler: onVolumeChange }
                     );
                     
                     // 监听 playing 事件（视频开始播放）
@@ -4454,14 +4535,15 @@ const VideoDetail = () => {
                   
                   // 检查元素是否仍在文档中
                   if (videoElement && document.contains(videoElement)) {
-                    // 确保视频元素有正确的 src
-                    if (!videoElement.src && !videoElement.currentSrc && playUrl.url) {
+                    // 检查是否为 HLS 视频
+                    const isHLSVideo = playUrl.url?.includes('m3u8');
+
+                    // HLS 由 Hls.js / MSE 接管，不要把 .m3u8 直接赋给 video.src
+                    // （Chromium 无法原生播 m3u8，会报 "The element has no supported sources"）
+                    if (!isHLSVideo && !videoElement.src && !videoElement.currentSrc && playUrl.url) {
                       console.log('视频元素缺少 src，尝试设置:', playUrl.url);
                       videoElement.src = playUrl.url;
                     }
-                    
-                    // 检查是否为 HLS 视频
-                    const isHLSVideo = playUrl.url?.includes('m3u8');
                     
                     if (isHLSVideo) {
                       // HLS 视频：等待 manifest 解析完成
@@ -4908,7 +4990,7 @@ const VideoDetail = () => {
                         backBufferLength: 90,
                         maxBufferLength: 600, // 增加最大缓冲长度到600秒，确保音频流畅
                         maxMaxBufferLength: 600, // 增加最大缓冲长度上限到600秒
-                        startLevel: -1,
+                        ...HLS_LOCK_HIGHEST_CONFIG,
                         maxBufferSize: 600 * 1000 * 1000, // 最大缓冲大小 600MB（对应600秒视频）
                         maxBufferHole: 0.5, // 允许的最大缓冲间隙（秒）
                         highBufferWatchdogPeriod: 2, // 高缓冲监控周期（秒）
@@ -4924,6 +5006,7 @@ const VideoDetail = () => {
                       hls.attachMedia(videoElement);
                       
                       hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                        lockHlsHighestLevel(hls);
                         console.log('onStart: HLS manifest 解析完成');
                         // 等待视频元素准备好再设置播放状态
                         // 需要等待 readyState >= 1 且至少等待 canplay 事件

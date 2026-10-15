@@ -1,6 +1,16 @@
 // preload.js
 const { contextBridge, ipcRenderer } = require('electron');
 
+function readVideoDataSync() {
+  try {
+    return ipcRenderer.sendSync('get-video-data-sync');
+  } catch (_) {
+    return null;
+  }
+}
+
+const initialVideoData = readVideoDataSync();
+
 // Expose protected methods that allow the renderer process to use
 // the ipcRenderer without exposing the entire object
 contextBridge.exposeInMainWorld('electronAPI', {
@@ -14,6 +24,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openPageWindow: (path, title) => ipcRenderer.invoke('open-page-window', path, title),
   updateVideoWindowTitle: (title) => ipcRenderer.invoke('update-video-window-title', title),
   getVideoData: () => ipcRenderer.invoke('get-video-data'),
+  getVideoDataSync: () => {
+    const live = readVideoDataSync();
+    return live != null ? live : initialVideoData;
+  },
   /** 播放窗切集时通知其它窗口同步选中集数 */
   notifyPlayerEpisodeChanged: (videoId, episodeNumber) => {
     ipcRenderer.send('player-episode-changed', { videoId, episodeNumber });
@@ -51,5 +65,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     } catch (_) {
       /* ignore */
     }
+  },
+  notifyPopupReady: () => {
+    try {
+      ipcRenderer.send('popup-ready');
+    } catch (_) { /* ignore */ }
   },
 });

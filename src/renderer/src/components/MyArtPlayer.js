@@ -1,6 +1,12 @@
 import React, { useEffect, useRef, useState, useImperativeHandle, forwardRef } from 'react';
 import Artplayer from 'artplayer';
 import Hls from 'hls.js';
+import { destroyHlsInstance, silenceAllPageMedia, stopMediaElement } from '../utils/mediaCleanup';
+import { HLS_LOCK_HIGHEST_CONFIG, lockHlsHighestLevel } from '../utils/hlsQuality';
+
+/** 全局只允许一路 HLS/ArtPlayer，防止切片后旧实例继续出声 */
+let liveArtPlayer = null;
+let liveHlsPlayer = null;
 
 if (typeof window !== 'undefined') {
   window.Hls = Hls;
@@ -76,6 +82,36 @@ function formatSkipTime(seconds) {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
+// ─── 变速播放缓冲门控
+// 高倍速会按倍速消耗缓冲；连播下一集时若立刻 1.5x/2x，HLS 常缓冲不足导致卡死。
+// 策略：目标倍速 > 1 时先以 1x 起播，前方缓冲够了再升速；缓冲吃紧或 stalled 时临时降回 1x。
+const RATE_GATE = {
+  applyMinBuffer: 8,     // 起播后至少攒够这么多秒再应用 >1x
+  keepMinBuffer: 2.5,    // 低于此值则临时降到 1x
+  restoreMinBuffer: 10,  // 恢复目标倍速所需前方缓冲
+  monitorMs: 800,
+};
+
+function getForwardBufferSeconds(video) {
+  if (!video || !video.buffered || video.buffered.length === 0) return 0;
+  const t = video.currentTime || 0;
+  try {
+    for (let i = 0; i < video.buffered.length; i += 1) {
+      const start = video.buffered.start(i);
+      const end = video.buffered.end(i);
+      if (t >= start - 0.35 && t <= end + 0.35) {
+        return Math.max(0, end - t);
+      }
+    }
+    // 当前时间不在任一 buffered 区间内时，取最近的后方区间
+    for (let i = 0; i < video.buffered.length; i += 1) {
+      const end = video.buffered.end(i);
+      if (end > t) return Math.max(0, end - t);
+    }
+  } catch (_) { /* ignore */ }
+  return 0;
+}
+
 const MyArtPlayer = forwardRef(({
   url,
   playing = false,
@@ -117,9 +153,11 @@ const MyArtPlayer = forwardRef(({
   const isPlayingRef = useRef(playing);
   const currentVolumeRef = useRef(volume);
   const currentMutedRef = useRef(muted);
-  const currentPlaybackRateRef = useRef(playbackRate);
+  const currentPlaybackRateRef = useRef(playbackRate); // 用户目标倍速（UI / 设置）
   const hasActivatedSpeedIndicatorRef = useRef(playbackRate !== 1);
   const syncSpeedIndicatorRef = useRef(null);
+  const isRateGatingRef = useRef(false); // 门控改倍速时忽略 ratechange，避免写回 1x
+  const rateGateControllerRef = useRef(null); // { setTarget, destroy, onStall }
   const autoNextEpisodeRef = useRef(autoNextEpisode);
   const onToggleAutoNextEpisodeRef = useRef(onToggleAutoNextEpisode);
   const isFullscreenRef = useRef(isFullscreen);
@@ -261,11 +299,12 @@ const MyArtPlayer = forwardRef(({
   const lastSkipCheckRef = useRef(0); // 节流：1.5s 检测一次
   const videoIdRef = useRef(videoId); // 始终保持最新 videoId，供回调使用
 
-  // videoId 变化时重新读取对应的跳过配置
+  // videoId 变化时重新读取对应的跳过配置；倍速按片子重置（由父组件传 1x）
   useEffect(() => {
     videoIdRef.current = videoId;
     skipConfigRef.current = readSkipConfig(videoId);
-  }, [videoId]);
+    hasActivatedSpeedIndicatorRef.current = (Number(playbackRate) || 1) !== 1;
+  }, [videoId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const container = containerRef?.current ? containerRef : (containerRef || containerRefInternal);
 
@@ -288,20 +327,25 @@ const MyArtPlayer = forwardRef(({
       return 0;
     },
     setPlaybackRate: (rate) => {
+      const numericRate = Number(rate) || 1;
+      currentPlaybackRateRef.current = numericRate;
+      if (syncSpeedIndicatorRef.current) {
+        syncSpeedIndicatorRef.current(numericRate);
+      }
+      try {
+        const item = artInstanceRef.current?.setting?.find?.('speed');
+        if (item) item.tooltip = numericRate === 1 ? '正常' : `${numericRate}x`;
+      } catch (_) { /* ignore */ }
+      // 走缓冲门控：切集/高倍速时不会立刻把缓冲抽干
+      if (rateGateControllerRef.current?.setTarget) {
+        rateGateControllerRef.current.setTarget(numericRate);
+        return;
+      }
       if (artInstanceRef.current) {
-        try { artInstanceRef.current.playbackRate = rate; } catch (_) { /* ignore */ }
+        try { artInstanceRef.current.playbackRate = numericRate; } catch (_) { /* ignore */ }
         if (artInstanceRef.current.video) {
-          artInstanceRef.current.video.playbackRate = rate;
+          artInstanceRef.current.video.playbackRate = numericRate;
         }
-        currentPlaybackRateRef.current = rate;
-        if (syncSpeedIndicatorRef.current) {
-          syncSpeedIndicatorRef.current(rate);
-        }
-        // 同步更新设置面板速度选择器的 tooltip
-        try {
-          const item = artInstanceRef.current.setting?.find?.('speed');
-          if (item) item.tooltip = rate === 1 ? '正常' : `${rate}x`;
-        } catch (_) { /* ignore */ }
       }
     },
     getInternalPlayer: () => artInstanceRef.current,
@@ -327,15 +371,42 @@ const MyArtPlayer = forwardRef(({
     if (!container.current) return;
     if (!url || typeof url !== 'string' || url.trim() === '') return;
 
-    // 销毁旧实例
-    if (artInstanceRef.current) {
-      try { artInstanceRef.current.destroy(); } catch (_) { /* ignore */ }
-      artInstanceRef.current = null;
-    }
-    if (hlsInstanceRef.current) {
-      try { hlsInstanceRef.current.destroy(); } catch (_) { /* ignore */ }
-      hlsInstanceRef.current = null;
-    }
+    const teardownPlayer = (art, hls) => {
+      try {
+        if (typeof document !== 'undefined' && document.pictureInPictureElement) {
+          document.exitPictureInPicture().catch(() => {});
+        }
+      } catch (_) { /* ignore */ }
+      const video = art?.video;
+      if (video) {
+        if (video._artPlayerHandlers) {
+          Object.entries(video._artPlayerHandlers).forEach(([type, handler]) => {
+            video.removeEventListener(type, handler);
+          });
+          delete video._artPlayerHandlers;
+        }
+        if (video._wtvStallRecovery?.teardown) {
+          try { video._wtvStallRecovery.teardown(); } catch (_) { /* ignore */ }
+          delete video._wtvStallRecovery;
+        }
+        destroyHlsInstance(video.hls);
+        try { video.hls = null; } catch (_) { /* ignore */ }
+        stopMediaElement(video);
+      }
+      destroyHlsInstance(hls);
+      if (art) {
+        try { art.pause(); } catch (_) { /* ignore */ }
+        try { art.destroy(); } catch (_) { /* ignore */ }
+      }
+      if (liveArtPlayer === art) liveArtPlayer = null;
+      if (liveHlsPlayer === hls) liveHlsPlayer = null;
+    };
+
+    // 先停掉页面上可能残留的旧媒体（切视频/复用播放窗时尤其关键）
+    silenceAllPageMedia();
+    teardownPlayer(artInstanceRef.current, hlsInstanceRef.current);
+    artInstanceRef.current = null;
+    hlsInstanceRef.current = null;
 
     lastPlaybackEndedAtRef.current = 0;
 
@@ -368,6 +439,11 @@ const MyArtPlayer = forwardRef(({
     const art = new Artplayer({
       container: container.current,
       url,
+      // 代理地址形如 /api/proxy-m3u8/s/tv?url=...index.m3u8，路径本身无 .m3u8 后缀。
+      // ArtPlayer 默认用 getExt(url)（会先去掉 query）推断类型，会误判并直接把 m3u8 赋给
+      // video.src，Chromium 无法原生播放 → "The element has no supported sources"。
+      // 显式 type 才能命中下方 customType.m3u8，走 Hls.js。
+      type: isHLS ? 'm3u8' : undefined,
       autoplay: playing,
       volume,
       muted,
@@ -400,151 +476,300 @@ const MyArtPlayer = forwardRef(({
           if (HlsClass.isSupported && HlsClass.isSupported()) {
             let fatalNetRetries = 0;
             let fatalMediaRetries = 0;
+            let hardRecoverCount = 0;
+            let lastFragAt = Date.now();
+            let lastMediaTime = 0;
+            let lastMediaAdvanceAt = Date.now();
+            let recovering = false;
+            let hls = null;
+            let freezeWatchTimer = null;
+
             const resetFatalCounters = () => {
               fatalNetRetries = 0;
               fatalMediaRetries = 0;
             };
 
-            const hls = new HlsClass({
-              // ─── 核心：根据 blockAdEnabled 决定是否使用过滤 Loader（与 LunaTV 完全一致）
-              loader: blockAdEnabledRef.current
-                ? CustomHlsJsLoader          // 开启：过滤 #EXT-X-DISCONTINUITY 广告标记
-                : HlsClass.DefaultConfig.loader, // 关闭：使用默认 Loader
-              enableWorker: true,
-              lowLatencyMode: false,
-              backBufferLength: 90,
-              maxBufferLength: 600,
-              maxMaxBufferLength: 600,
-              maxBufferSize: 600 * 1000 * 1000,
-              // 略放宽：减少 CDN 抖动时被误判为「洞」导致中途停住
-              maxBufferHole: 1.5,
-              highBufferWatchdogPeriod: 2,
-              nudgeOffset: 0.1,
-              nudgeMaxRetry: 5,
-              maxFragLoadingTimeOut: 30000,
-              fragLoadingTimeOut: 30000,
-              manifestLoadingTimeOut: 20000,
-              levelLoadingTimeOut: 20000,
-              maxStarvationDelay: 8,
-              abrEwmaDefaultEstimate: 500000,
-              abrBandWidthFactor: 0.95,
-              abrBandWidthUpFactor: 0.7,
-            });
+            const buildHlsConfig = () => {
+              return {
+                // ─── 核心：根据 blockAdEnabled 决定是否使用过滤 Loader（与 LunaTV 完全一致）
+                loader: blockAdEnabledRef.current
+                  ? CustomHlsJsLoader
+                  : HlsClass.DefaultConfig.loader,
+                // Electron 下 Worker 偶发静默停住后不再拉分片，主线程更稳
+                enableWorker: false,
+                lowLatencyMode: false,
+                backBufferLength: 30,
+                // 600s 缓冲过大，容易占满 MSE / 状态机异常后长期不再请求分片
+                maxBufferLength: 120,
+                maxMaxBufferLength: 180,
+                maxBufferSize: 120 * 1000 * 1000,
+                maxBufferHole: 1.5,
+                highBufferWatchdogPeriod: 2,
+                nudgeOffset: 0.1,
+                nudgeMaxRetry: 8,
+                maxFragLoadingTimeOut: 20000,
+                fragLoadingTimeOut: 20000,
+                manifestLoadingTimeOut: 15000,
+                levelLoadingTimeOut: 15000,
+                maxStarvationDelay: 4,
+                // 拉流锁定最高清，不再按带宽自动降档
+                ...HLS_LOCK_HIGHEST_CONFIG,
+              };
+            };
 
-            hlsInstanceRef.current = hls;
-            hls.loadSource(src);
-            hls.attachMedia(video);
+            const bindHlsEvents = (instance) => {
+              instance.on(HlsClass.Events.FRAG_LOADING, () => {
+                lastFragAt = Date.now();
+              });
+              instance.on(HlsClass.Events.FRAG_LOADED, () => {
+                lastFragAt = Date.now();
+                resetFatalCounters();
+              });
+              instance.on(HlsClass.Events.LEVEL_LOADED, () => {
+                lastFragAt = Date.now();
+              });
+              instance.on(HlsClass.Events.MANIFEST_PARSED, () => {
+                lockHlsHighestLevel(instance);
+                resetFatalCounters();
+                if (onLoadedMetadataRef.current) onLoadedMetadataRef.current();
+              });
+              instance.on(HlsClass.Events.LEVELS_UPDATED, () => {
+                lockHlsHighestLevel(instance);
+              });
 
-            // 将 hls 实例挂到 video 元素上，兼容 VideoDetail.js 中的检测逻辑
-            video.hls = hls;
+              instance.on(HlsClass.Events.ERROR, (_event, data) => {
+                if (!data || hlsInstanceRef.current !== instance) return;
+                const ED = HlsClass.ErrorDetails;
 
-            hls.on(HlsClass.Events.FRAG_LOADED, resetFatalCounters);
-
-            hls.on(HlsClass.Events.ERROR, function (_event, data) {
-              if (!data) return;
-              const ED = HlsClass.ErrorDetails;
-
-              // 非致命错误：常见于中途 buffer stalled、分片超时，单次 startLoad 常能续播
-              if (!data.fatal) {
-                if (ED) {
-                  const d = data.details;
-                  if (
-                    d === ED.BUFFER_STALLED_ERROR ||
-                    d === ED.BUFFER_SEEK_OVER_HOLE ||
-                    d === ED.FRAG_LOAD_ERROR ||
-                    d === ED.FRAG_LOAD_TIMEOUT ||
-                    d === ED.LEVEL_LOAD_ERROR
-                  ) {
-                    try {
-                      console.warn('WTV HLS non-fatal → startLoad', d);
-                      hls.startLoad();
-                    } catch (_) { /* ignore */ }
+                if (!data.fatal) {
+                  if (ED) {
+                    const d = data.details;
+                    if (
+                      d === ED.BUFFER_STALLED_ERROR ||
+                      d === ED.BUFFER_SEEK_OVER_HOLE ||
+                      d === ED.FRAG_LOAD_ERROR ||
+                      d === ED.FRAG_LOAD_TIMEOUT ||
+                      d === ED.LEVEL_LOAD_ERROR ||
+                      d === ED.LEVEL_LOAD_TIMEOUT
+                    ) {
+                      console.warn('WTV HLS non-fatal → softRecover', d);
+                      softRecover(instance, d === ED.BUFFER_STALLED_ERROR);
+                    }
                   }
+                  return;
+                }
+
+                switch (data.type) {
+                  case HlsClass.ErrorTypes.NETWORK_ERROR:
+                    fatalNetRetries += 1;
+                    if (fatalNetRetries <= 3) {
+                      console.warn('WTV HLS fatal network → startLoad', fatalNetRetries, data.details);
+                      try { instance.startLoad(); } catch (_) { /* ignore */ }
+                    } else if (fatalNetRetries <= 5) {
+                      console.warn('WTV HLS fatal network → reloadSource', fatalNetRetries);
+                      try {
+                        const t = video.currentTime || 0;
+                        instance.loadSource(src);
+                        instance.startLoad(t > 1 ? t - 0.3 : -1);
+                      } catch (_) { /* ignore */ }
+                    } else {
+                      // 旧逻辑这里 destroy 后不再拉流，必须重启 App；改为硬恢复重建实例
+                      console.error('WTV HLS fatal network → hardRecover', data.details);
+                      hardRecover('fatal-network');
+                    }
+                    break;
+                  case HlsClass.ErrorTypes.MEDIA_ERROR:
+                    fatalMediaRetries += 1;
+                    if (fatalMediaRetries <= 3) {
+                      console.warn('WTV HLS fatal media → recoverMediaError', fatalMediaRetries);
+                      try { instance.recoverMediaError(); } catch (_) { /* ignore */ }
+                    } else {
+                      console.error('WTV HLS fatal media → hardRecover', data.details);
+                      hardRecover('fatal-media');
+                    }
+                    break;
+                  default:
+                    console.error('WTV HLS fatal other → hardRecover', data.type, data.details);
+                    hardRecover('fatal-other');
+                }
+              });
+            };
+
+            const softRecover = (instance, withRateGate = true) => {
+              if (!instance || hlsInstanceRef.current !== instance) return;
+              try {
+                instance.stopLoad();
+              } catch (_) { /* ignore */ }
+              try {
+                instance.startLoad();
+              } catch (_) { /* ignore */ }
+              if (withRateGate) {
+                try { rateGateControllerRef.current?.onStall?.(); } catch (_) { /* ignore */ }
+              }
+            };
+
+            // 硬恢复：销毁并重建 HLS（保留当前进度）。解决「无拉流、只有重启 App 才好」的卡死态
+            const hardRecover = (reason) => {
+              if (recovering) return;
+              if (hlsInstanceRef.current && hls && hlsInstanceRef.current !== hls) return;
+              hardRecoverCount += 1;
+              if (hardRecoverCount > 4) {
+                console.error('WTV HLS hardRecover 次数过多，上报错误', reason);
+                resetFatalCounters();
+                if (onErrorRef.current) {
+                  onErrorRef.current(new Error(`HLS 播放中断，请重试 (${reason})`));
                 }
                 return;
               }
+              recovering = true;
+              const resumeAt = Math.max(0, (video.currentTime || 0) - 0.5);
+              const shouldPlay = !video.paused && isPlayingRef.current;
+              console.warn('WTV HLS hardRecover', { reason, resumeAt, hardRecoverCount });
 
-              switch (data.type) {
-                case HlsClass.ErrorTypes.NETWORK_ERROR:
-                  fatalNetRetries += 1;
-                  if (fatalNetRetries <= 3) {
-                    console.warn('WTV HLS fatal network → startLoad', fatalNetRetries, data.details);
-                    try {
-                      hls.startLoad();
-                    } catch (_) { /* ignore */ }
-                  } else if (fatalNetRetries <= 5) {
-                    console.warn('WTV HLS fatal network → reloadSource', fatalNetRetries);
+              try {
+                if (hls) {
+                  destroyHlsInstance(hls);
+                  if (liveHlsPlayer === hls) liveHlsPlayer = null;
+                }
+              } catch (_) { /* ignore */ }
+
+              try {
+                hls = new HlsClass(buildHlsConfig());
+                hlsInstanceRef.current = hls;
+                liveHlsPlayer = hls;
+                video.hls = hls;
+                bindHlsEvents(hls);
+                hls.loadSource(src);
+                hls.attachMedia(video);
+                hls.once(HlsClass.Events.MANIFEST_PARSED, () => {
+                  lockHlsHighestLevel(hls);
+                  try {
+                    if (resumeAt > 1) video.currentTime = resumeAt;
+                  } catch (_) { /* ignore */ }
+                  try { hls.startLoad(resumeAt > 1 ? resumeAt : -1); } catch (_) { /* ignore */ }
+                  lockHlsHighestLevel(hls);
+                  if (shouldPlay) {
+                    video.play().catch(() => { /* ignore */ });
+                  }
+                  lastFragAt = Date.now();
+                  lastMediaAdvanceAt = Date.now();
+                  lastMediaTime = video.currentTime || resumeAt;
+                  resetFatalCounters();
+                  recovering = false;
+                });
+                // 兜底：manifest 回调异常时也解除 recovering
+                setTimeout(() => { recovering = false; }, 8000);
+              } catch (err) {
+                console.error('WTV HLS hardRecover 失败', err);
+                recovering = false;
+                if (onErrorRef.current) {
+                  onErrorRef.current(new Error('HLS 恢复失败，请重试'));
+                }
+              }
+            };
+
+            // 冻结看门狗：应在播放但进度不动、且长时间无分片加载 → 分级恢复
+            const startFreezeWatchdog = () => {
+              if (freezeWatchTimer) clearInterval(freezeWatchTimer);
+              freezeWatchTimer = setInterval(() => {
+                if (recovering) return;
+                if (!hls || hlsInstanceRef.current !== hls) return;
+                if (video.error) return;
+                // 用户暂停 / 未处于播放意图时不干预
+                if (video.paused || !isPlayingRef.current) {
+                  lastMediaAdvanceAt = Date.now();
+                  lastMediaTime = video.currentTime || 0;
+                  return;
+                }
+
+                const now = Date.now();
+                const t = video.currentTime || 0;
+                if (Math.abs(t - lastMediaTime) > 0.15) {
+                  lastMediaTime = t;
+                  lastMediaAdvanceAt = now;
+                  // 正常推进时缓慢衰减硬恢复计数，避免偶发错误后永久敏感
+                  if (hardRecoverCount > 0 && now - lastFragAt < 5000) {
+                    hardRecoverCount = Math.max(0, hardRecoverCount - 1);
+                  }
+                  return;
+                }
+
+                const frozenFor = now - lastMediaAdvanceAt;
+                const noFragFor = now - lastFragAt;
+                const ahead = getForwardBufferSeconds(video);
+
+                // 已有足够前方缓冲但仍不动：优先 media 恢复（可能是解码/卡洞）
+                if (frozenFor >= 2500 && ahead >= 2) {
+                  console.warn('WTV HLS freeze(with buffer) → recoverMediaError', { frozenFor, ahead });
+                  try { rateGateControllerRef.current?.onStall?.(); } catch (_) { /* ignore */ }
+                  try { hls.recoverMediaError(); } catch (_) { /* ignore */ }
+                  try { video.currentTime = t + 0.05; } catch (_) { /* ignore */ }
+                  lastMediaAdvanceAt = now;
+                  return;
+                }
+
+                // 无缓冲 + 无分片：典型「卡住且没有拉流」
+                if (frozenFor >= 2200 && ahead < 1.2) {
+                  try { rateGateControllerRef.current?.onStall?.(); } catch (_) { /* ignore */ }
+                  if (noFragFor >= 6000 || frozenFor >= 8000) {
+                    hardRecover(noFragFor >= 6000 ? 'watchdog-no-frag' : 'watchdog-frozen');
+                    return;
+                  }
+                  if (frozenFor >= 4000) {
+                    console.warn('WTV HLS freeze → reloadSource', { frozenFor, noFragFor, ahead });
                     try {
                       hls.loadSource(src);
-                      hls.startLoad();
-                    } catch (_) { /* ignore */ }
-                  } else {
-                    console.error('WTV HLS fatal network, give up', data.details);
-                    resetFatalCounters();
-                    if (onErrorRef.current) {
-                      onErrorRef.current(new Error(`HLS 网络错误: ${data.details || ''}`));
+                      hls.startLoad(t > 1 ? t - 0.3 : -1);
+                    } catch (_) {
+                      softRecover(hls, false);
                     }
-                    try {
-                      hls.destroy();
-                    } catch (_) { /* ignore */ }
+                    lastFragAt = now;
+                    return;
                   }
-                  break;
-                case HlsClass.ErrorTypes.MEDIA_ERROR:
-                  fatalMediaRetries += 1;
-                  if (fatalMediaRetries <= 3) {
-                    console.warn('WTV HLS fatal media → recoverMediaError', fatalMediaRetries);
-                    try {
-                      hls.recoverMediaError();
-                    } catch (_) { /* ignore */ }
-                  } else {
-                    console.error('WTV HLS fatal media, give up', data.details);
-                    resetFatalCounters();
-                    if (onErrorRef.current) {
-                      onErrorRef.current(new Error(`HLS 解码错误: ${data.details || ''}`));
-                    }
-                    try {
-                      hls.destroy();
-                    } catch (_) { /* ignore */ }
-                  }
-                  break;
-                default:
-                  if (onErrorRef.current) {
-                    onErrorRef.current(new Error(`HLS 错误: ${data.type} ${data.details || ''}`));
-                  }
-                  try {
-                    hls.destroy();
-                  } catch (_) { /* ignore */ }
-              }
-            });
+                  console.warn('WTV HLS freeze → softRecover', { frozenFor, noFragFor, ahead });
+                  softRecover(hls, true);
+                }
+              }, 1000);
+            };
 
-            hls.on(HlsClass.Events.MANIFEST_PARSED, function () {
-              resetFatalCounters();
-              if (onLoadedMetadataRef.current) onLoadedMetadataRef.current();
-            });
+            hls = new HlsClass(buildHlsConfig());
+            hlsInstanceRef.current = hls;
+            liveHlsPlayer = hls;
+            hls.loadSource(src);
+            hls.attachMedia(video);
+            // 将 hls 实例挂到 video 元素上，兼容 VideoDetail.js 中的检测逻辑
+            video.hls = hls;
+            bindHlsEvents(hls);
+            startFreezeWatchdog();
 
-            // 播放中途缓冲跟不上：<video> stalled / 长时间 waiting 时温和触发 HLS 续拉（避免一直卡住）
+            // 播放中途缓冲跟不上：stalled / waiting 时续拉，并通知倍速门控临时降速
             const stallState = { waitingTimer: null };
             const recoverFromBufferStall = () => {
               if (video.error) return;
-              if (hlsInstanceRef.current !== hls) return;
-              try {
-                console.warn('WTV HLS video stalled/waiting → startLoad');
-                hls.startLoad();
-              } catch (_) { /* ignore */ }
+              if (!hls || hlsInstanceRef.current !== hls) return;
+              console.warn('WTV HLS video stalled/waiting → softRecover');
+              softRecover(hls, true);
             };
             const onStalled = () => recoverFromBufferStall();
             const onWaiting = () => {
+              if ((Number(currentPlaybackRateRef.current) || 1) > 1.01) {
+                try { rateGateControllerRef.current?.onStall?.(); } catch (_) { /* ignore */ }
+              }
               if (stallState.waitingTimer) clearTimeout(stallState.waitingTimer);
               stallState.waitingTimer = setTimeout(() => {
                 stallState.waitingTimer = null;
                 if (video.error) return;
                 if (video.readyState < 3) recoverFromBufferStall();
-              }, 2800);
+              }, 1200);
             };
             video.addEventListener('stalled', onStalled);
             video.addEventListener('waiting', onWaiting);
             video._wtvStallRecovery = {
               teardown: () => {
+                if (freezeWatchTimer) {
+                  clearInterval(freezeWatchTimer);
+                  freezeWatchTimer = null;
+                }
                 if (stallState.waitingTimer) {
                   clearTimeout(stallState.waitingTimer);
                   stallState.waitingTimer = null;
@@ -582,6 +807,12 @@ const MyArtPlayer = forwardRef(({
       },
     });
 
+    if (liveArtPlayer && liveArtPlayer !== art) {
+      try { liveArtPlayer.pause(); } catch (_) { /* ignore */ }
+      try { liveArtPlayer.destroy(); } catch (_) { /* ignore */ }
+    }
+    liveArtPlayer = art;
+
     // ─── 在 ready 事件中统一完成视频元素事件绑定和设置面板初始化
     const handleReady = () => {
       artInstanceRef.current = art;
@@ -591,12 +822,9 @@ const MyArtPlayer = forwardRef(({
         art.video.controls = false;
         art.video.removeAttribute('controls');
 
-        // 恢复音量/静音/倍速
+        // 恢复音量/静音；倍速走下方缓冲门控（避免连播下一集立刻高倍速把缓冲抽干）
         art.volume = currentVolumeRef.current;
         art.muted = currentMutedRef.current;
-        try { art.playbackRate = currentPlaybackRateRef.current; } catch (_) { /* ignore */ }
-        // 直接设置 video.playbackRate 作为双重保险
-        art.video.playbackRate = currentPlaybackRateRef.current;
 
         const ensureSpeedIndicator = () => {
           if (!art.container) return null;
@@ -626,6 +854,113 @@ const MyArtPlayer = forwardRef(({
         };
         syncSpeedIndicatorRef.current = syncSpeedIndicator;
         syncSpeedIndicator(currentPlaybackRateRef.current);
+
+        // 缓冲感知倍速控制器
+        if (rateGateControllerRef.current?.destroy) {
+          try { rateGateControllerRef.current.destroy(); } catch (_) { /* ignore */ }
+        }
+        const createRateGateController = (videoEl) => {
+          let monitorTimer = null;
+          let destroyed = false;
+          let throttled = false;
+
+          const setEffectiveRate = (rate) => {
+            if (destroyed || !videoEl) return;
+            const next = Number(rate) || 1;
+            if (Math.abs((videoEl.playbackRate || 1) - next) < 0.01) return;
+            isRateGatingRef.current = true;
+            try { art.playbackRate = next; } catch (_) { /* ignore */ }
+            try { videoEl.playbackRate = next; } catch (_) { /* ignore */ }
+            // ratechange 可能同步触发，下一 macrotask 再清标志更稳
+            setTimeout(() => {
+              isRateGatingRef.current = false;
+            }, 0);
+          };
+
+          const evaluate = () => {
+            if (destroyed || !videoEl || !document.contains(videoEl)) return;
+            const target = Number(currentPlaybackRateRef.current) || 1;
+            // ≤1x 不需要门控，直接应用（含 0.5 / 0.75）
+            if (target <= 1.01) {
+              throttled = false;
+              setEffectiveRate(target);
+              return;
+            }
+            const ahead = getForwardBufferSeconds(videoEl);
+            const applyMin = RATE_GATE.applyMinBuffer * Math.min(1.5, target);
+            const keepMin = RATE_GATE.keepMinBuffer * Math.min(1.25, target);
+            const restoreMin = RATE_GATE.restoreMinBuffer * Math.min(1.5, target);
+
+            if (!throttled) {
+              // 起播阶段：缓冲不够先保持 1x
+              if ((videoEl.playbackRate || 1) <= 1.01 && ahead < applyMin) {
+                setEffectiveRate(1);
+                return;
+              }
+              if (ahead < keepMin) {
+                throttled = true;
+                console.warn('WTV rateGate → throttle to 1x', { ahead, target });
+                setEffectiveRate(1);
+                return;
+              }
+              setEffectiveRate(target);
+              return;
+            }
+
+            // 已降速：缓冲恢复后再拉回目标倍速
+            if (ahead >= restoreMin && videoEl.readyState >= 3) {
+              throttled = false;
+              console.warn('WTV rateGate → restore', { ahead, target });
+              setEffectiveRate(target);
+            } else {
+              setEffectiveRate(1);
+            }
+          };
+
+          const startMonitor = () => {
+            if (monitorTimer || destroyed) return;
+            monitorTimer = setInterval(evaluate, RATE_GATE.monitorMs);
+          };
+
+          const stopMonitor = () => {
+            if (monitorTimer) {
+              clearInterval(monitorTimer);
+              monitorTimer = null;
+            }
+          };
+
+          return {
+            setTarget: (rate) => {
+              currentPlaybackRateRef.current = Number(rate) || 1;
+              throttled = false;
+              evaluate();
+              startMonitor();
+            },
+            onStall: () => {
+              const target = Number(currentPlaybackRateRef.current) || 1;
+              if (target <= 1.01) return;
+              throttled = true;
+              setEffectiveRate(1);
+              startMonitor();
+            },
+            destroy: () => {
+              destroyed = true;
+              stopMonitor();
+            },
+          };
+        };
+
+        const rateGate = createRateGateController(art.video);
+        rateGateControllerRef.current = rateGate;
+        // 目标 >1x 时先 1x 起播，等缓冲；=1x 则直接应用
+        const initialTarget = Number(currentPlaybackRateRef.current) || 1;
+        if (initialTarget > 1.01) {
+          isRateGatingRef.current = true;
+          try { art.playbackRate = 1; } catch (_) { /* ignore */ }
+          art.video.playbackRate = 1;
+          setTimeout(() => { isRateGatingRef.current = false; }, 0);
+        }
+        rateGate.setTarget(initialTarget);
 
         // 恢复切换去广告前的播放进度
         if (pendingResumeRef.current !== null) {
@@ -701,11 +1036,18 @@ const MyArtPlayer = forwardRef(({
         };
 
         const handleRateChange = () => {
+          // 门控临时降速/升速不写回父组件，避免把用户目标倍速覆盖成 1x
+          if (isRateGatingRef.current) {
+            if (syncSpeedIndicatorRef.current) {
+              syncSpeedIndicatorRef.current(currentPlaybackRateRef.current);
+            }
+            return;
+          }
           const newRate = art.video.playbackRate;
           if (syncSpeedIndicatorRef.current) {
             syncSpeedIndicatorRef.current(newRate);
           }
-          if (currentPlaybackRateRef.current !== newRate) {
+          if (Math.abs((currentPlaybackRateRef.current || 1) - newRate) > 0.01) {
             currentPlaybackRateRef.current = newRate;
             if (onRateChangeRef.current) onRateChangeRef.current(newRate);
           }
@@ -750,12 +1092,15 @@ const MyArtPlayer = forwardRef(({
           })),
           onSelect: function (item) {
             const rate = item.value;
-            // 直接设置速度
-            try { art.playbackRate = rate; } catch (_) { /* ignore */ }
-            if (art.video) art.video.playbackRate = rate;
             currentPlaybackRateRef.current = rate;
             if (syncSpeedIndicatorRef.current) {
               syncSpeedIndicatorRef.current(rate);
+            }
+            if (rateGateControllerRef.current?.setTarget) {
+              rateGateControllerRef.current.setTarget(rate);
+            } else {
+              try { art.playbackRate = rate; } catch (_) { /* ignore */ }
+              if (art.video) art.video.playbackRate = rate;
             }
             if (onRateChangeRef.current) onRateChangeRef.current(rate);
             return item.html;
@@ -952,33 +1297,14 @@ const MyArtPlayer = forwardRef(({
     artInstanceRef.current = art;
 
     return () => {
-      if (artInstanceRef.current && artInstanceRef.current.video) {
-        const video = artInstanceRef.current.video;
-        if (video._artPlayerHandlers) {
-          Object.entries(video._artPlayerHandlers).forEach(([type, handler]) => {
-            video.removeEventListener(type, handler);
-          });
-          delete video._artPlayerHandlers;
-        }
-        if (video._wtvStallRecovery?.teardown) {
-          try {
-            video._wtvStallRecovery.teardown();
-          } catch (_) { /* ignore */ }
-          delete video._wtvStallRecovery;
-        }
-        if (video.hls) {
-          try { video.hls.destroy(); } catch (_) { /* ignore */ }
-          video.hls = null;
-        }
+      if (rateGateControllerRef.current?.destroy) {
+        try { rateGateControllerRef.current.destroy(); } catch (_) { /* ignore */ }
+        rateGateControllerRef.current = null;
       }
-      if (hlsInstanceRef.current) {
-        try { hlsInstanceRef.current.destroy(); } catch (_) { /* ignore */ }
-        hlsInstanceRef.current = null;
-      }
-      if (artInstanceRef.current) {
-        try { artInstanceRef.current.destroy(); } catch (_) { /* ignore */ }
-        artInstanceRef.current = null;
-      }
+      teardownPlayer(artInstanceRef.current, hlsInstanceRef.current);
+      artInstanceRef.current = null;
+      hlsInstanceRef.current = null;
+      silenceAllPageMedia();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [url, blockAdEnabled]); // ← blockAdEnabled 变化时重建播放器（与 LunaTV 一致）
@@ -1009,22 +1335,25 @@ const MyArtPlayer = forwardRef(({
     }
   }, [muted]);
 
-  // 同步倍速：直接同时设置 art.playbackRate 和 video.playbackRate，确保生效
+  // 同步倍速：更新目标倍速，由缓冲门控决定何时真正写到 video
   useEffect(() => {
-    if (!artInstanceRef.current) return;
-    try { artInstanceRef.current.playbackRate = playbackRate; } catch (_) { /* ignore */ }
-    if (artInstanceRef.current.video) {
-      artInstanceRef.current.video.playbackRate = playbackRate;
-    }
     currentPlaybackRateRef.current = playbackRate;
     if (syncSpeedIndicatorRef.current) {
       syncSpeedIndicatorRef.current(playbackRate);
     }
-    // 同步更新设置面板速度选择器的 tooltip 显示
     try {
-      const item = artInstanceRef.current.setting?.find?.('speed');
+      const item = artInstanceRef.current?.setting?.find?.('speed');
       if (item) item.tooltip = playbackRate === 1 ? '正常' : `${playbackRate}x`;
     } catch (_) { /* ignore */ }
+    if (!artInstanceRef.current) return;
+    if (rateGateControllerRef.current?.setTarget) {
+      rateGateControllerRef.current.setTarget(playbackRate);
+      return;
+    }
+    try { artInstanceRef.current.playbackRate = playbackRate; } catch (_) { /* ignore */ }
+    if (artInstanceRef.current.video) {
+      artInstanceRef.current.video.playbackRate = playbackRate;
+    }
   }, [playbackRate]);
 
   // 同步“自动连播”设置项状态

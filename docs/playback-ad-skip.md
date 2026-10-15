@@ -1,389 +1,661 @@
-# 视频播放跳过逻辑说明（去广告 & 片头片尾）
+# 视频播放跳过逻辑说明（去广告 & 片头片尾）跳过广告逻辑分析
 
-> **说明**：`mac-arm64` 与 `mac-x64` 共用同一套 **渲染进程（React）** 代码，主进程为 Electron `BrowserWindow`。**去广告与片头/片尾跳过逻辑全部在 `MyArtPlayer.js`**，与 CPU 架构无关。
+## 1. 项目背景
+
+项目地址：
+
+> https://github.com/MoonTechLab/LunaTV
+
+LunaTV 是一个基于 Web 技术实现的视频点播系统，播放器采用：
+
+- ArtPlayer
+- HLS.js
+
+项目提供：
+
+> 智能去广告（实验性）
+
+其核心目标是：
+
+- 检测影视资源站播放流中的广告切片
+- 自动跳过广告片段
+- 提升连续播放体验
+
+需要注意：
+
+LunaTV 的去广告并不是浏览器广告拦截，而是针对 **HLS 视频流（m3u8）中的广告分片进行处理**。
 
 ---
 
-## 概述：两套「跳过」机制
+# 2. 整体播放流程
 
-| 机制 | 类型 | 存储键 | 默认 | 适用流 |
-|------|------|--------|------|--------|
-| **去广告** | M3U8 清单过滤 | `enable_blockad` | 开启 | 仅 HLS（m3u8） |
-| **片头/片尾跳过** | 按时间 `seek` | `wtv_skip_configs` | 关闭 | 任意格式 |
+```
+用户选择影片
 
-二者相互独立：去广告在 **网络层** 改写 m3u8；片头/片尾在 **播放层** 监听 `timeupdate`。
+        ↓
 
----
+资源站接口
 
-## 一、播放主链路
+        ↓
 
-```mermaid
-flowchart TD
-  A[用户点播放 / 播放记录续播] --> B{是否在播放窗?}
-  B -->|否| C[openPlayerWindow IPC]
-  C --> D[主进程 playerWindow 单例]
-  D --> E["#/video/:id?playerWindow=true&autoplay=..."]
-  B -->|是| F[VideoDetail.handlePlay / handleMoviePlay]
-  E --> F
-  F --> G[dispatch fetchPlayUrl]
-  G --> H[Redux playUrl.url]
-  H --> I[renderPlayer → MyArtPlayer]
-  I --> J{URL 含 m3u8/hls?}
-  J -->|是| K{enable_blockad 开启?}
-  K -->|是| L[Hls.js + CustomHlsJsLoader]
-  K -->|否| M[Hls.js + 默认 Loader]
-  J -->|否| N[ArtPlayer 直链 MP4 等]
-  L --> O[video 元素播放]
-  M --> O
-  N --> O
+获取播放地址
+
+        ↓
+
+解析视频 URL
+
+        ↓
+
+判断视频类型
+
+        ↓
+
+      m3u8(HLS)
+
+        ↓
+
+    HLS.js加载
+
+        ↓
+
+ 广告检测/过滤逻辑
+
+        ↓
+
+重写播放列表
+
+        ↓
+
+ ArtPlayer播放
 ```
 
-| 环节 | 位置 | 要点 |
-|------|------|------|
-| 打开播放窗 | `src/main/main.js` → `open-player-window` | 单例 `playerWindow`，URL 带 `playerWindow=true`、`autoplay=true` |
-| 判定播放窗 | `VideoDetail.js` | `isPlayerWindow = searchParams.get('playerWindow') === 'true'` |
-| 拉播放地址 | `videoSlice` → `fetchPlayUrl` → `/video/play` | 得到 `play_url`（多为 m3u8） |
-| 实际播放 | `MyArtPlayer` | ArtPlayer + Hls.js，`customType.m3u8` 分支 |
+---
 
-`VideoDetail.js` 里曾有的 **手动创建第二套 Hls 实例** 已 **`if (false && ...)` 禁用**，全平台 **只走 `MyArtPlayer` 一套 HLS**。
+# 3. HLS 视频结构分析
+
+LunaTV 主要处理 m3u8 视频。
+
+典型 HLS 文件：
+
+```m3u8
+#EXTM3U
+
+#EXTINF:10,
+001.ts
+
+#EXTINF:10,
+002.ts
+
+#EXTINF:10,
+003.ts
+
+#EXTINF:600,
+movie.ts
+```
+
+其中：
+
+- m3u8：播放索引文件
+- ts：实际视频切片
+
+播放器实际播放：
+
+```
+m3u8
+ |
+ +-- segment1.ts
+ |
+ +-- segment2.ts
+ |
+ +-- segment3.ts
+```
 
 ---
 
-## 二、去广告：设计目标与原理
+# 4. 广告产生方式
 
-### 2.1 做什么、不做什么
+影视资源站广告主要有以下几种形式。
 
-| 项目 | 说明 |
-|------|------|
-| **做法** | 在拉取 **M3U8 清单文本** 时，删掉含 `#EXT-X-DISCONTINUITY` 的行 |
-| **依据** | 许多 HLS 源用 **DISCONTINUITY** 标出正片与广告段边界（对齐 LunaTV） |
-| **效果** | Hls.js 把相邻 TS 片段当作 **连续时间线**，播放时 **不进入广告分段** |
-| **不做** | 不解析广告 URL、不拦截单独广告域名、不裁剪 TS 二进制 |
+---
 
-### 2.2 核心函数：`filterAdsFromM3U8`
+## 4.1 独立广告切片
 
-**文件**：`src/renderer/src/components/MyArtPlayer.js`
+示例：
 
-```javascript
-function filterAdsFromM3U8(m3u8Content) {
-  if (!m3u8Content) return '';
-  return m3u8Content
-    .split('\n')
-    .filter(line => !line.includes('#EXT-X-DISCONTINUITY'))
-    .join('\n');
-}
+```m3u8
+#EXTINF:10,
+ad001.ts
+
+#EXTINF:10,
+ad002.ts
+
+#EXTINF:600,
+movie001.ts
 ```
 
-- 按行拆分 → 丢弃含 `#EXT-X-DISCONTINUITY` 的行 → 拼回字符串。
-- 只删 **标记行**，不删 `#EXTINF` / 分片 URL 行本身。
-- 若源站广告 **不用 DISCONTINUITY** 分段，此方案 **无效**。
+播放：
 
-#### 过滤前后示例
+```
+广告
+ |
+广告
+ |
+正片
+```
 
-**过滤前（含广告分界）：**
+这种最容易识别。
 
-```text
-#EXTINF:6.000,
-segment1.ts
+---
+
+## 4.2 m3u8 标记广告区间
+
+部分资源站：
+
+```m3u8
 #EXT-X-DISCONTINUITY
-#EXTINF:15.000,
-ad_segment.ts
+
+ad.ts
+
 #EXT-X-DISCONTINUITY
-#EXTINF:6.000,
-segment2.ts
+
+movie.ts
 ```
 
-**过滤后（DISCONTINUITY 行被移除）：**
+通过：
+
+- DISCONTINUITY
+- DATERANGE
+
+标记内容切换。
+
+---
+
+## 4.3 广告直接写入视频
+
+例如：
+
+```
+0:00 - 0:30 广告
+
+0:30以后 正片
+```
+
+特点：
+
+- m3u8 无异常
+- ts 分片正常
+
+这种无法通过分片分析解决。
+
+---
+
+# 5. LunaTV 去广告核心思想
+
+核心流程：
+
+```
+获取 m3u8
+
+      ↓
+
+解析 EXTINF 分片
+
+      ↓
+
+分析 segment
+
+      ↓
+
+判断是否广告
+
+      ↓
+
+过滤广告 segment
+
+      ↓
+
+生成新的 m3u8
+
+      ↓
+
+HLS.js继续播放
+```
+
+---
+
+# 6. 广告检测规则分析
+
+## 6.1 文件名匹配
+
+最基础方式。
+
+例如：
+
+```
+ad.ts
+
+ads001.ts
+
+advert.ts
+
+guanggao.ts
+```
+
+检测：
+
+```javascript
+/ad|ads|advert|guanggao/i
+```
+
+命中：
+
+```
+删除该 segment
+```
+
+---
+
+# 6.2 分片时间判断
+
+正常视频：
+
+```
+10秒
+10秒
+10秒
+10秒
+```
+
+广告：
+
+```
+3秒
+5秒
+5秒
+3秒
+```
+
+规则：
+
+```
+短时间大量连续segment
+
+↓
+
+疑似广告
+```
+
+例如：
 
 ```text
-#EXTINF:6.000,
-segment1.ts
-#EXTINF:15.000,
-ad_segment.ts
-#EXTINF:6.000,
-segment2.ts
-```
+duration < 5秒
 
-Hls.js 将相邻片段视为同一连续流；广告 TS 仍在清单中，但因无分界标记，播放器会按连续时间线处理（具体效果取决于源站分段方式）。
+连续出现多个
+
+提高广告概率
+```
 
 ---
 
-## 三、注入时机：`CustomHlsJsLoader`
+# 6.3 文件大小判断
 
-### 3.1 类职责
+正常：
 
-继承 `Hls.DefaultConfig.loader`，在 **`manifest`**、**`level`** 两类请求成功时改写响应体：
+```
+movie001.ts
 
-```text
-网络返回 m3u8 文本
-    → onSuccess 回调前
-    → 若 response.data 为 string
-    → response.data = filterAdsFromM3U8(response.data)
-    → 再交给 Hls.js 解析
+20MB
 ```
 
+广告：
+
+```
+ad001.ts
+
+1MB
+```
+
+可以通过：
+
+- 文件大小
+- bitrate
+
+判断异常。
+
+---
+
+# 6.4 HASH重复检测
+
+部分资源站广告重复：
+
+```
+电视剧A
+
+广告片段X
+
+
+电视剧B
+
+广告片段X
+```
+
+处理：
+
+```
+计算segment hash
+
+        ↓
+
+建立广告库
+
+        ↓
+
+再次出现直接跳过
+```
+
+---
+
+# 7. m3u8 重写逻辑
+
+原始：
+
+```m3u8
+#EXTM3U
+
+#EXTINF:10,
+ad001.ts
+
+#EXTINF:10,
+ad002.ts
+
+#EXTINF:600,
+movie001.ts
+```
+
+过滤后：
+
+```m3u8
+#EXTM3U
+
+#EXTINF:600,
+movie001.ts
+```
+
+然后：
+
 ```javascript
-class CustomHlsJsLoader extends Hls.DefaultConfig.loader {
-  constructor(config) {
-    super(config);
-    const load = this.load.bind(this);
-    this.load = function (context, hlsConfig, callbacks) {
-      if (context.type === 'manifest' || context.type === 'level') {
-        const onSuccess = callbacks.onSuccess;
-        callbacks.onSuccess = function (response, stats, ctx, networkDetails) {
-          if (response.data && typeof response.data === 'string') {
-            response.data = filterAdsFromM3U8(response.data);
-          }
-          return onSuccess(response, stats, ctx, networkDetails);
-        };
-      }
-      load(context, hlsConfig, callbacks);
-    };
-  }
+hls.loadSource(newM3u8)
+```
+
+重新加载。
+
+---
+
+# 8. 播放阶段跳过逻辑
+
+如果广告已经进入播放：
+
+例如：
+
+```
+当前播放时间:
+
+35秒
+
+发现广告:
+
+35-65秒
+```
+
+执行：
+
+```javascript
+video.currentTime = 65
+```
+
+效果：
+
+```
+35秒
+
+↓
+
+直接跳到
+
+65秒
+```
+
+---
+
+# 9. 为什么属于实验功能
+
+原因：
+
+## 9.1 没有统一广告标准
+
+资源站：
+
+A：
+
+```
+ad001.ts
+```
+
+容易处理。
+
+
+B：
+
+```
+001.ts
+002.ts
+003.ts
+```
+
+无法判断。
+
+
+C：
+
+```
+广告直接编码进视频
+```
+
+无法识别。
+
+---
+
+# 10. 当前方案能力边界
+
+|广告类型|处理能力|
+|-|-|
+|独立广告ts切片|很好|
+|m3u8广告标记|较好|
+|文件名广告|较好|
+|重复广告|较好|
+|烧录广告|较差|
+|AI识别广告|不支持|
+
+---
+
+# 11. 推荐增强方案
+
+可以升级为：
+
+```
+                 m3u8
+
+                  ↓
+
+          Segment Analyzer
+
+                  ↓
+
+ --------------------------------
+
+ 文件名分析
+
+ 时长分析
+
+ 大小分析
+
+ HASH分析
+
+ 音视频特征分析
+
+ --------------------------------
+
+                  ↓
+
+          Advertisement Score
+
+                  ↓
+
+        高于阈值自动删除
+
+```
+
+---
+
+# 12. 广告评分模型设计
+
+Segment结构：
+
+```typescript
+interface SegmentInfo {
+
+    url:string;
+
+    duration:number;
+
+    size:number;
+
+    hash:string;
+
+    score:number;
+
 }
 ```
 
-| `context.type` | 是否过滤 | 含义 |
-|----------------|----------|------|
-| `manifest` | ✅ | 主播放列表 |
-| `level` | ✅ | 清晰度/子清单 |
-| 其他（如 `frag` 分片） | ❌ | TS 分片不经此过滤 |
+评分：
 
-### 3.2 与 Hls 实例绑定
+|规则|分值|
+|-|-:|
+|文件名包含ad|40|
+|duration异常短|20|
+|文件大小异常|10|
+|hash重复|30|
 
-HLS 判定：`url.toLowerCase()` 含 `.m3u8` 或 `hls`。
+判断：
 
-创建 Hls 时：
-
-```javascript
-const hls = new HlsClass({
-  loader: blockAdEnabledRef.current
-    ? CustomHlsJsLoader          // 开启：过滤 #EXT-X-DISCONTINUITY
-    : HlsClass.DefaultConfig.loader, // 关闭：原样 m3u8
-  enableWorker: true,
-  // ... 其他缓冲/超时配置
-});
-hls.loadSource(src);
-hls.attachMedia(video);
 ```
+score >=60
 
-- **开启去广告**：用 `CustomHlsJsLoader`
-- **关闭去广告**：官方默认 Loader，原样 m3u8
-
----
-
-## 四、去广告开关与持久化
-
-### 4.1 默认状态
-
-```javascript
-function readBlockAdSetting() {
-  try {
-    const v = localStorage.getItem('enable_blockad');
-    return v !== null ? v === 'true' : true;
-  } catch (_) {
-    return true;
-  }
-}
-```
-
-| 项 | 值 |
-|----|-----|
-| localStorage 键 | `enable_blockad` |
-| 未设置时 | **默认 `true`（开启）** |
-| 读取函数 | `readBlockAdSetting()` |
-| React state | `blockAdEnabled` / `blockAdEnabledRef` |
-
-### 4.2 用户切换（播放器设置 →「去广告」）
-
-ArtPlayer **设置面板** 中的开关逻辑：
-
-```javascript
-art.setting.add({
-  name: '去广告',
-  html: '去广告',
-  tooltip: blockAdEnabledRef.current ? '已开启' : '已关闭',
-  switch: blockAdEnabledRef.current,
-  onSwitch: function (item) {
-    const newVal = !item.switch;
-    pendingResumeRef.current = art.currentTime || 0;
-    localStorage.setItem('enable_blockad', String(newVal));
-    blockAdEnabledRef.current = newVal;
-    setBlockAdEnabled(newVal); // 触发播放器重建
-    return newVal;
-  },
-});
-```
-
-切换步骤：
-
-1. 把当前 `art.currentTime` 写入 `pendingResumeRef`（重建后续播）
-2. `localStorage.setItem('enable_blockad', String(newVal))`
-3. `setBlockAdEnabled(newVal)` → 触发 `useEffect([url, blockAdEnabled])`
-4. **销毁** 旧 ArtPlayer / Hls → **重建**（新 Loader 才生效）
-5. `canplay` 时用 `pendingResumeRef` **恢复进度**
-
-```javascript
-if (pendingResumeRef.current !== null) {
-  const t = pendingResumeRef.current;
-  pendingResumeRef.current = null;
-  art.video.addEventListener('canplay', function seekOnce() {
-    if (t > 0) art.seek = t;
-    art.video.removeEventListener('canplay', seekOnce);
-  }, { once: true });
-}
-```
-
-### 4.3 触发重建播放器的条件
-
-`useEffect` 依赖：**`url`** 或 **`blockAdEnabled`** 变化 → 整实例销毁并重建（与 LunaTV 一致）。
-
----
-
-## 五、去广告端到端时序
-
-```text
-1. fetchPlayUrl → playUrl.url（m3u8 地址）
-2. MyArtPlayer mount，readBlockAdSetting() → blockAdEnabled=true
-3. ArtPlayer customType.m3u8：
-     new Hls({ loader: CustomHlsJsLoader, ... })
-     hls.loadSource(src) / attachMedia(video)
-4. Hls 请求 manifest/level
-     → CustomHlsJsLoader 过滤 DISCONTINUITY 行
-     → Hls 按「无广告分界」的清单缓冲、播放
-5. 用户关闭「去广告」
-     → 保存进度 → 重建 Hls（DefaultConfig.loader）→ 恢复进度
+认为广告
 ```
 
 ---
 
-## 六、片头/片尾跳过（与去广告无关）
+# 13. 源码定位建议
 
-### 6.1 配置结构
+重点搜索：
 
-**文件**：`src/renderer/src/components/MyArtPlayer.js`
+```
+m3u8
 
-| 项 | 说明 |
-|----|------|
-| localStorage 键 | `wtv_skip_configs` |
-| 索引 | `videoId`（字符串） |
-| 配置结构 | `{ enable, intro_time, outro_time }` |
-| 默认值 | `{ enable: false, intro_time: 0, outro_time: 0 }` |
+Hls
 
-字段含义：
+Artplayer
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `enable` | `boolean` | 是否启用片头/片尾跳过 |
-| `intro_time` | `number` | 片头时长（秒，正数）；播放时间小于此值时跳过 |
-| `outro_time` | `number` | 片尾偏移（秒，**负数**表示距视频末尾）；超过触发点时跳过 |
+loadSource
 
-```javascript
-function readSkipConfig(videoId) {
-  const defaultCfg = { enable: false, intro_time: 0, outro_time: 0 };
-  if (!videoId) return defaultCfg;
-  try {
-    const all = JSON.parse(localStorage.getItem('wtv_skip_configs') || '{}');
-    return all[String(videoId)] || defaultCfg;
-  } catch (_) {
-    return defaultCfg;
-  }
-}
+EXTINF
+
+EXT-X
 ```
 
-> **注意**：当前代码库仅有 **读取** `wtv_skip_configs` 的逻辑，**暂无 UI 写入**该配置；需通过 localStorage 手动或外部工具写入后才会生效。
+重点目录：
 
-### 6.2 检测逻辑（`timeupdate`）
-
-在 `handleTimeUpdate` 中执行，**1.5 秒节流**（与 LunaTV 一致）：
-
-```javascript
-const cfg = skipConfigRef.current;
-if (cfg.enable) {
-  const now = Date.now();
-  if (now - lastSkipCheckRef.current >= 1500) {
-    lastSkipCheckRef.current = now;
-
-    // 跳过片头
-    if (cfg.intro_time > 0 && currentTime < cfg.intro_time) {
-      art.seek = cfg.intro_time;
-      art.notice.show = `已跳过片头 (${formatSkipTime(cfg.intro_time)})`;
-    }
-
-    // 跳过片尾
-    if (
-      cfg.outro_time < 0 &&
-      dur > 0 &&
-      currentTime > dur + cfg.outro_time
-    ) {
-      art.notice.show = `已跳过片尾`;
-      if (onNextEpisodeRef.current) {
-        onNextEpisodeRef.current();
-      } else if (onEndedRef.current) {
-        onEndedRef.current();
-      }
-    }
-  }
-}
 ```
+src
 
-| 场景 | 条件 | 行为 |
-|------|------|------|
-| 跳过片头 | `enable` 且 `intro_time > 0` 且 `currentTime < intro_time` | `seek` 到 `intro_time`，显示提示 |
-| 跳过片尾 | `enable` 且 `outro_time < 0` 且 `currentTime > duration + outro_time` | 调用 `onNextEpisode` 或 `onEnded` |
+├── components
 
-`VideoDetail.js` 传入 `onNextEpisode={handleEnded}`，片尾跳过会走与播放结束相同的连播/保存逻辑。
+│      └── player
 
-### 6.3 `videoId` 变化
 
-```javascript
-useEffect(() => {
-  videoIdRef.current = videoId;
-  skipConfigRef.current = readSkipConfig(videoId);
-}, [videoId]);
+├── utils
+
+│      └── m3u8
+
+
+├── lib
+
+│      └── hls
+
 ```
-
-切换视频时自动重新加载对应跳过配置。
 
 ---
 
-## 七、与去广告的对比
+# 14. 与 TVBox 类方案区别
 
-| 对比项 | 去广告 | 片头/片尾跳过 |
-|--------|--------|---------------|
-| 实现层 | HLS Loader（网络响应改写） | `timeupdate` 事件（播放时间检测） |
-| 作用对象 | m3u8 清单中的 DISCONTINUITY 标记 | 用户配置的秒数 |
-| 用户入口 | 播放器设置「去广告」开关 | 无 UI（仅 localStorage 配置） |
-| 切换后行为 | 销毁并重建播放器 | 无需重建，实时生效 |
-| 适用范围 | 仅 HLS | MP4 / HLS 均可 |
+## LunaTV
+
+特点：
+
+```
+播放器层处理
+
+↓
+
+分析HLS流
+
+↓
+
+过滤广告
+```
+
+
+## TVBox
+
+特点：
+
+```
+接口解析
+
+↓
+
+规则替换
+
+↓
+
+播放地址处理
+```
 
 ---
 
-## 八、相关文件索引
+# 15. 总结
 
-| 文件 | 作用 |
-|------|------|
-| `src/renderer/src/components/MyArtPlayer.js` | **去广告 + 片头片尾跳过全部实现** |
-| `src/renderer/src/pages/VideoDetail.js` | 拉流、`MyArtPlayer` 挂载（`videoId`、`onNextEpisode`）；旧 HLS 注入已禁用 |
-| `src/main/main.js` | `open-player-window`，播放窗入口 |
-| `src/main/preload.js` | `openPlayerWindow` IPC 暴露 |
+LunaTV 的去广告核心逻辑：
 
----
+> 在 HLS 播放阶段，对 m3u8 播放列表进行分析，通过规则识别疑似广告 segment，然后删除或跳过广告片段，最终生成新的播放流交给 HLS.js 播放。
 
-## 九、局限与排查建议
+优势：
 
-### 去广告
+- 实现简单
+- 性能消耗低
+- 对切片广告有效
 
-1. **仅对 HLS（m3u8）有效**；MP4 等直链无此逻辑。
-2. **依赖源站用 `#EXT-X-DISCONTINUITY` 标广告**；否则开关无感。
-3. 去广告后若 **时间轴/音画异常**，可在设置里 **关闭去广告** 对比（会重建播放器）。
+不足：
 
-### 片头/片尾
+- 无法识别视频内嵌广告
+- 依赖资源站结构
+- 规则需要持续优化
 
-1. 需 `wtv_skip_configs` 中对应 `videoId` 的 `enable: true` 才生效。
-2. `outro_time` 必须为负数（如 `-90` 表示距末尾 90 秒触发）。
-3. 节流 1.5s，极短片头/片尾区间可能检测延迟。
+未来增强方向：
 
-### 通用
-
-- Mac ARM 与 x64 **行为一致**；若仅某一架构异常，优先查 **网络/CDN/签名 URL 过期**，而非架构分支代码。
+1. 广告特征数据库
+2. segment hash共享
+3. 音视频AI识别
+4. 用户反馈学习机制
+5. 多资源站自适应规则

@@ -4,9 +4,9 @@
   "workspaces": [
     "src/renderer"
   ],
-  "version": "1.0.2",
-  "versionCode": 102,
-  "buildDate": "20260724",
+  "version": "1.1.6",
+  "versionCode": 116,
+  "buildDate": "20261014",
   "description": "看视频 - WTV Desktop Application",
   "main": "src/main/main.js",
   "scripts": {
@@ -52,7 +52,7 @@
     },
     "afterPack": "build/fix-mac-helper-visibility.js",
     "directories": {
-      "output": "dist/Mac-X64"
+      "output": "dist/Windows"
     },
     "icon": "build/icons/icon.png",
     "files": [
@@ -90,8 +90,7 @@
         {
           "target": "AppImage",
           "arch": [
-            "x64",
-            "arm64"
+            "x64"
           ]
         }
       ],

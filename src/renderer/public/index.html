@@ -26,6 +26,22 @@
       Learn how to configure a non-root public URL by running `npm run build`.
     -->
     <title>看视频 - WTV</title>
+    <style>
+      html, body, #root { background: #0f0f0f; color: #e6e6e6; margin: 0; }
+      html.wtv-popup-window .app-header,
+      html.wtv-popup-window .app-footer { display: none !important; }
+      html.wtv-popup-window .app-container { padding-top: 12px !important; padding-bottom: 0 !important; }
+    </style>
+    <script>
+      (function () {
+        try {
+          var hash = location.hash || '';
+          if (hash.indexOf('newWindow=true') !== -1) {
+            document.documentElement.className += ' wtv-popup-window';
+          }
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body>
     <noscript>You need to enable JavaScript to run this app.</noscript>

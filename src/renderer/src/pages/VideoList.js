@@ -42,8 +42,8 @@ const VideoList = () => {
   const observerInstance = useRef(null); // Intersection Observer 实例
   const categoryFetchedRef = useRef(null); // 记录已获取的分类，防止重复调用
   const fetchingRef = useRef(false); // 防止同一分类同时发起多个请求
-  // 用于标记上一次的类别
-  const prevCategoryRef = useRef(null);
+  // 当前分类最近一次由用户滚动产生的位置
+  const lastScrollYRef = useRef(0);
   // 标记当前分类是否已完成滚动恢复，避免数据追加时重复触发
   const restoredCategoryRef = useRef(null);
   
@@ -80,28 +80,27 @@ const VideoList = () => {
     });
   }, [category, page, categoryData.data.length, categoryData.pagination, categoryData.loading]);
   
-  // 监听 category 变化：保存旧分类滚动位置，并重置当前分类恢复标记
+  // 分类切换时重置恢复标记：恢复完成前产生的滚动（新页面高度变化导致的位置截断）不记录
   useEffect(() => {
-    if (prevCategoryRef.current && prevCategoryRef.current !== category) {
-      const scrollY = window.scrollY;
-      sessionStorage.setItem(scrollStorageKey(prevCategoryRef.current), String(scrollY));
-    }
     restoredCategoryRef.current = null;
-    prevCategoryRef.current = category;
-  }, [category, scrollStorageKey]);
+  }, [category]);
 
-  // 列表滚动过程中持续保存当前位置，保证切换/返回时更准确
+  // 只记录用户在本分类下真实滚动产生的位置。
+  // 离开时不能读 window.scrollY：此时新页面已渲染，滚动位置可能已被更短的内容截断。
   useEffect(() => {
     let rafId = null;
     const persistScroll = () => {
       rafId = null;
-      sessionStorage.setItem(scrollStorageKey(category), String(window.scrollY));
+      sessionStorage.setItem(scrollStorageKey(category), String(lastScrollYRef.current));
     };
     const handleScroll = () => {
-      if (rafId !== null) {
+      if (restoredCategoryRef.current !== category) {
         return;
       }
-      rafId = window.requestAnimationFrame(persistScroll);
+      lastScrollYRef.current = window.scrollY;
+      if (rafId === null) {
+        rafId = window.requestAnimationFrame(persistScroll);
+      }
     };
     window.addEventListener('scroll', handleScroll, { passive: true });
 
@@ -110,8 +109,9 @@ const VideoList = () => {
       if (rafId !== null) {
         window.cancelAnimationFrame(rafId);
       }
-      const scrollY = window.scrollY;
-      sessionStorage.setItem(scrollStorageKey(category), String(scrollY));
+      if (restoredCategoryRef.current === category) {
+        sessionStorage.setItem(scrollStorageKey(category), String(lastScrollYRef.current));
+      }
     };
   }, [category, scrollStorageKey]);
   
@@ -123,7 +123,7 @@ const VideoList = () => {
 
     const savedPosition = readStoredNumber(scrollStorageKey(category)) || 0;
     const shouldWaitForData =
-      savedPosition > 0 && categoryData.loading && categoryData.data.length === 0;
+      savedPosition > 0 && categoryData.data.length === 0 && !categoryData.error;
 
     if (shouldWaitForData) {
       return;
@@ -131,11 +131,12 @@ const VideoList = () => {
 
     const rafId = window.requestAnimationFrame(() => {
       window.scrollTo({ top: savedPosition, left: 0, behavior: 'auto' });
+      lastScrollYRef.current = savedPosition;
       restoredCategoryRef.current = category;
     });
 
     return () => window.cancelAnimationFrame(rafId);
-  }, [category, categoryData.loading, categoryData.data.length, readStoredNumber, scrollStorageKey]);
+  }, [category, categoryData.data.length, categoryData.error, readStoredNumber, scrollStorageKey]);
   
   useEffect(() => {
     // 防止重复调用：如果正在获取同一分类的数据，跳过
@@ -427,6 +428,7 @@ const VideoList = () => {
       sessionStorage.setItem(scrollStorageKey(category), '0');
       sessionStorage.setItem(pageStorageKey(category), '1');
       window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+      lastScrollYRef.current = 0;
       restoredCategoryRef.current = category;
       loadingRef.current = false;
       handleFilterChangeRef.current(activeFilters);

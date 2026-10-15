@@ -18,16 +18,34 @@ import TestPage from './pages/TestPage';
 import DiagnosticPage from './pages/DiagnosticPage';
 import PlaybackTestPage from './pages/PlaybackTestPage';
 
+function readPopupWindowFlag() {
+  try {
+    const hash = (typeof window !== 'undefined' ? window.location.hash : '') || '';
+    const search = (typeof window !== 'undefined' ? window.location.search : '') || '';
+    const fromHash = hash.includes('?') ? hash.slice(hash.indexOf('?') + 1) : '';
+    const params = new URLSearchParams(fromHash || search.replace(/^\?/, ''));
+    return params.get('newWindow') === 'true';
+  } catch (_) {
+    return false;
+  }
+}
+
 function RoutesComponent() {
   const location = useLocation();
-  // 检测是否是 newWindow 参数（新窗口打开的视频详情页）
-  // HashRouter 中，查询参数在 location.search 中，例如 "?newWindow=true"
-  // 或者从 window.location.hash 中解析
   const isNewWindow = React.useMemo(() => {
+    if (readPopupWindowFlag()) return true;
     const hash = window.location.hash || location.hash || '';
     const urlParams = new URLSearchParams(hash.split('?')[1] || location.search);
     return urlParams.get('newWindow') === 'true';
   }, [location]);
+
+  if (isNewWindow && typeof document !== 'undefined') {
+    document.documentElement.classList.add('wtv-popup-window');
+  }
+
+  React.useEffect(() => {
+    document.documentElement.classList.toggle('wtv-popup-window', isNewWindow);
+  }, [isNewWindow]);
   
   return (
     <div className={`app-container ${isNewWindow ? 'app-container-no-header' : ''}`}>

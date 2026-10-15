@@ -22,6 +22,82 @@ let currentVideoWindowTitle = '视频详情';
 
 let pngsucaiCookie = '';
 
+function isDevEnv() {
+  return !app.isPackaged && process.env.NODE_ENV !== 'production';
+}
+
+function resolveRendererIndexPath() {
+  const appPath = app.getAppPath();
+  const candidates = [
+    path.join(appPath, 'src', 'renderer', 'build', 'index.html'),
+    path.join(appPath, 'renderer', 'build', 'index.html'),
+    path.join(appPath, 'build', 'index.html'),
+    path.join(__dirname, '..', 'renderer', 'build', 'index.html'),
+  ];
+  return candidates.find((p) => fs.existsSync(p)) || candidates[0];
+}
+
+/** 首次加载就带上 hash，避免先画出主站顶栏再跳到弹窗页 */
+function loadRendererRoute(win, hashRoute) {
+  const hash = String(hashRoute || '/').replace(/^#/, '');
+  if (isDevEnv()) {
+    return win.loadURL(`http://localhost:3000/#${hash}`);
+  }
+  return win.loadFile(resolveRendererIndexPath(), { hash });
+}
+
+const POPUP_WINDOW_DEFAULTS = {
+  show: true,
+  backgroundColor: '#0f0f0f',
+  autoHideMenuBar: true,
+};
+
+function setupPopupWindow(win, { openDevTools = false } = {}) {
+  if (!win || win.isDestroyed()) return;
+  if (!win.isVisible()) win.show();
+  win.focus();
+  if (openDevTools) {
+    // 开发者工具延后打开，避免拖慢窗口弹出
+    win.once('ready-to-show', () => {
+      if (win.isDestroyed()) return;
+      try { win.webContents.openDevTools(); } catch (_) { /* ignore */ }
+    });
+  }
+}
+
+function toHashTarget(hashRoute) {
+  return `#${String(hashRoute || '/').replace(/^#/, '')}`;
+}
+
+/** 已打开的窗口用 SPA hash 跳转，避免整页重载再走白屏/加载中 */
+function navigateRendererRoute(win, hashRoute, seedData) {
+  if (!win || win.isDestroyed()) {
+    return Promise.resolve();
+  }
+  const target = toHashTarget(hashRoute);
+  let payload = 'null';
+  try {
+    payload = seedData == null ? 'null' : JSON.stringify(seedData);
+  } catch (_) {
+    payload = 'null';
+  }
+  const script = `
+    window.__WTV_INITIAL_VIDEO_DATA__ = ${payload};
+    window.dispatchEvent(new CustomEvent('wtv-video-data', { detail: window.__WTV_INITIAL_VIDEO_DATA__ }));
+    if (window.location.hash !== ${JSON.stringify(target)}) {
+      window.location.hash = ${JSON.stringify(target)};
+    }
+  `;
+  const currentUrl = (() => {
+    try { return win.webContents.getURL() || ''; } catch (_) { return ''; }
+  })();
+  const canSpaJump = currentUrl && (currentUrl.includes('localhost:3000') || currentUrl.startsWith('file:'));
+  if (canSpaJump) {
+    return win.webContents.executeJavaScript(script).catch(() => loadRendererRoute(win, hashRoute));
+  }
+  return loadRendererRoute(win, hashRoute);
+}
+
 // 获取 pngsucai 的 cookie
 const updatePngsucaiCookie = () => {
   console.log('🚀 [主进程] 开始请求 pngsucai 获取 Cookie...');
@@ -63,6 +139,17 @@ const updatePngsucaiCookie = () => {
 };
 
 const createWindow = () => {
+  // macOS 的 activate 可能早于 ready；此时 session.defaultSession 会抛
+  // "Session can only be received when app is ready"
+  if (!app.isReady()) {
+    app.whenReady().then(() => {
+      if (BrowserWindow.getAllWindows().length === 0) {
+        createWindow();
+      }
+    });
+    return;
+  }
+
   console.log('🏁 [主进程] createWindow 函数开始执行...');
   // 初始获取一次 pngsucai 的 cookie
   updatePngsucaiCookie();
@@ -123,8 +210,9 @@ const createWindow = () => {
       requestHeaders['Cookie'] = 'server_name_session=245619b23edc8a717a124f4092302064; img_auth=1767519930-102f39147b977d127328185881522622; Hm_lvt_386c683f3b0c25ee5b0bf789967980f8=1767519930; Hm_lpvt_386c683f3b0c25ee5b0bf789967980f8=1767519930; HMACCOUNT=2CDC1E500F1FB63C';
     }
 
-    // 🔧 开发模式下，为所有请求添加禁用缓存的头部
-    if (!app.isPackaged && process.env.NODE_ENV !== 'production') {
+    // 开发模式禁用接口缓存，但封面图必须能走浏览器缓存，否则切 tab 回来会空白
+    const isDev = !app.isPackaged && process.env.NODE_ENV !== 'production';
+    if (isDev && !isImageRequest && !details.url.includes('.m3u8') && !details.url.includes('.ts')) {
       requestHeaders['Cache-Control'] = 'no-cache, no-store, must-revalidate';
       requestHeaders['Pragma'] = 'no-cache';
       requestHeaders['Expires'] = '0';
@@ -576,7 +664,12 @@ const createWindow = () => {
 // This method will be called when Electron has finished
 // initialization and is ready to create browser windows.
 // Some APIs can only be used after this event occurs.
-app.on('ready', createWindow);
+// 使用 whenReady 而不是 on('ready')，避免与 macOS activate 竞态。
+app.whenReady().then(() => {
+  if (BrowserWindow.getAllWindows().length === 0) {
+    createWindow();
+  }
+});
 
 // Quit when all windows are closed, except on macOS. There, it's common
 // for applications and their menu bar to stay active until the user quits
@@ -615,8 +708,17 @@ app.on('will-quit', (event) => {
 app.on('activate', () => {
   // On OS X it's common to re-create a window in the app when the
   // dock icon is clicked and there are no other windows open.
+  // 启动阶段 activate 可能先于 ready，必须等 app 就绪再碰 session。
   if (BrowserWindow.getAllWindows().length === 0) {
-    createWindow();
+    if (app.isReady()) {
+      createWindow();
+    } else {
+      app.whenReady().then(() => {
+        if (BrowserWindow.getAllWindows().length === 0) {
+          createWindow();
+        }
+      });
+    }
   }
 });
 
@@ -763,8 +865,7 @@ ipcMain.handle('open-page-window', (event, pagePath, title) => {
     fullscreenable: false, // 禁用全屏功能
     maximizable: false, // 禁用最大化功能
     title: title || 'WTV',
-    backgroundColor: '#0f0f0f',
-    autoHideMenuBar: true,
+    ...POPUP_WINDOW_DEFAULTS,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
@@ -778,26 +879,8 @@ ipcMain.handle('open-page-window', (event, pagePath, title) => {
     pageWindow.setMenuBarVisibility(false);
   }
 
-  if (isDevelopment) {
-    const url = `http://localhost:3000/#${pagePath}?newWindow=true`;
-    pageWindow.loadURL(url);
-  } else {
-    const appPath = app.getAppPath();
-    let indexPath = path.join(appPath, 'src', 'renderer', 'build', 'index.html');
-    
-    // 生产环境路径兼容逻辑
-    const fs = require('fs');
-    if (!fs.existsSync(indexPath)) {
-      indexPath = path.join(appPath, 'renderer', 'build', 'index.html');
-    }
-    if (!fs.existsSync(indexPath)) {
-      indexPath = path.join(appPath, 'build', 'index.html');
-    }
-
-    pageWindow.loadFile(indexPath).then(() => {
-      pageWindow.webContents.executeJavaScript(`window.location.hash = '#${pagePath}?newWindow=true';`);
-    });
-  }
+  setupPopupWindow(pageWindow, { openDevTools: isDevelopment });
+  loadRendererRoute(pageWindow, `${pagePath}?newWindow=true`);
 
   return pageWindow.id;
 });
@@ -818,16 +901,7 @@ ipcMain.handle('open-video-window', (event, videoId, videoData) => {
     videoWindow.setTitle(newTitle);
     // 聚焦窗口
     videoWindow.focus();
-    
-    // 更新 URL 到新的视频
-    if (isDevelopment) {
-      // 开发环境：直接加载新的 URL
-      const videoUrl = `http://localhost:3000/#/video/${videoId}?newWindow=true`;
-      videoWindow.loadURL(videoUrl);
-    } else {
-      // 生产环境：更新 hash
-      videoWindow.webContents.executeJavaScript(`window.location.hash = '#/video/${videoId}?newWindow=true';`);
-    }
+    navigateRendererRoute(videoWindow, `/video/${videoId}?newWindow=true`, videoData);
     
     return videoWindow.id;
   }
@@ -846,8 +920,7 @@ ipcMain.handle('open-video-window', (event, videoId, videoData) => {
     fullscreenable: true, // 允许视频播放器全屏（HTML5 视频全屏需要此选项）
     maximizable: false, // 禁用最大化功能
     title: initialTitle,
-    backgroundColor: '#f5f5f5', // 设置背景色，避免白屏闪烁
-    autoHideMenuBar: true,
+    ...POPUP_WINDOW_DEFAULTS,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
@@ -972,60 +1045,55 @@ ipcMain.handle('open-video-window', (event, videoId, videoData) => {
     event.preventDefault();
   });
   
-  if (isDevelopment) {
-    // 开发环境：加载开发服务器 URL，添加 newWindow 参数标识这是新窗口
-    const videoUrl = `http://localhost:3000/#/video/${videoId}?newWindow=true`;
-    // 在加载前确保标题已设置
+  applyExpectedVideoTitle();
+  setupPopupWindow(videoWindow, { openDevTools: isDevelopment });
+  loadRendererRoute(videoWindow, `/video/${videoId}?newWindow=true`).catch(err => {
+    console.error('加载视频详情页失败:', err);
+  });
+  videoWindow.webContents.once('did-finish-load', () => {
     applyExpectedVideoTitle();
-    videoWindow.loadURL(videoUrl);
-    // 页面加载完成后，将 videoData 存储到 sessionStorage，供渲染进程使用
-    videoWindow.webContents.once('did-finish-load', () => {
-      if (videoData) {
-        videoWindow.webContents.executeJavaScript(`
-          if (window.sessionStorage) {
-            window.sessionStorage.setItem('videoData_${videoId}', ${JSON.stringify(videoData)});
-          }
-        `).catch(err => console.error('存储 videoData 失败:', err));
-      }
-    });
-    videoWindow.webContents.openDevTools();
-  } else {
-    // 生产环境：加载打包后的文件
-    const appPath = app.getAppPath();
-    let indexPath;
-    
-    if (app.isPackaged) {
-      indexPath = path.join(appPath, 'src', 'renderer', 'build', 'index.html');
-      const fs = require('fs');
-      if (!fs.existsSync(indexPath)) {
-        indexPath = path.join(appPath, 'renderer', 'build', 'index.html');
-      }
-      if (!fs.existsSync(indexPath)) {
-        indexPath = path.join(appPath, 'build', 'index.html');
-      }
-    } else {
-      indexPath = path.join(__dirname, '..', 'renderer', 'build', 'index.html');
-    }
-    
-    // 在加载前确保标题已设置
-    applyExpectedVideoTitle();
-    // 使用 loadFile 加载，然后设置 hash，添加 newWindow 参数标识这是新窗口
-    videoWindow.loadFile(indexPath).then(() => {
-      // 加载完成后设置 hash
-      videoWindow.webContents.executeJavaScript(`window.location.hash = '#/video/${videoId}?newWindow=true';`);
-      // 确保标题正确（可能在 loadFile 后被 HTML title 覆盖）
-      applyExpectedVideoTitle();
-    }).catch(err => {
-      console.error('加载视频详情页失败:', err);
-    });
-  }
-  
+  });
+
   return videoWindow.id;
 });
 
+const STOP_PAGE_MEDIA_JS = `
+(() => {
+  try {
+    if (document.pictureInPictureElement) {
+      document.exitPictureInPicture();
+    }
+  } catch (e) {}
+  document.querySelectorAll('video, audio').forEach((el) => {
+    try { el.pause(); } catch (e) {}
+    try { el.muted = true; el.volume = 0; } catch (e) {}
+    try {
+      if (el.hls) {
+        try { el.hls.stopLoad(); } catch (e2) {}
+        try { el.hls.detachMedia(); } catch (e2) {}
+        try { el.hls.destroy(); } catch (e2) {}
+        el.hls = null;
+      }
+    } catch (e) {}
+    try {
+      el.removeAttribute('src');
+      el.src = '';
+      el.srcObject = null;
+      el.load();
+    } catch (e) {}
+  });
+})();
+`;
+
+function stopWindowMedia(win) {
+  if (!win || win.isDestroyed() || !win.webContents) {
+    return Promise.resolve();
+  }
+  return win.webContents.executeJavaScript(STOP_PAGE_MEDIA_JS).catch(() => {});
+}
+
 // 创建新窗口打开视频播放页（只保留一个播放窗口）
 ipcMain.handle('open-player-window', (event, videoId, videoData, episodeNumber) => {
-  const isDevelopment = !app.isPackaged && process.env.NODE_ENV !== 'production';
   const finalEpisodeNumber = episodeNumber || videoData?.autoPlayEpisode || '';
   /** 从播放记录续播：由渲染进程读取 playHistory 做带进度续播，勿在 URL 上加 autoplayEpisode（否则会先无进度连播，与续播逻辑冲突） */
   const resumeFromPlayHistory = !!(videoData && videoData.playHistory);
@@ -1067,11 +1135,12 @@ ipcMain.handle('open-player-window', (event, videoId, videoData, episodeNumber) 
     }
     playerWindow.focus();
 
-    if (isDevelopment) {
-      playerWindow.loadURL(`http://localhost:3000/#/video/${videoId}?${query}`);
-    } else {
-      playerWindow.webContents.executeJavaScript(`window.location.hash = '#/video/${videoId}?${query}';`);
-    }
+    // 先掐掉当前正在播的音视频，再换片；否则 hash 切换时旧 HLS 会继续出声
+    const navigatePlayer = () => {
+      if (!playerWindow || playerWindow.isDestroyed()) return;
+      navigateRendererRoute(playerWindow, `/video/${videoId}?${query}`, currentPlayerVideoData);
+    };
+    stopWindowMedia(playerWindow).finally(navigatePlayer);
 
     return playerWindow.id;
   }
@@ -1089,8 +1158,7 @@ ipcMain.handle('open-player-window', (event, videoId, videoData, episodeNumber) 
     fullscreenable: true,
     maximizable: false,
     title: initialTitle,
-    backgroundColor: '#0f0f0f',
-    autoHideMenuBar: true,
+    ...POPUP_WINDOW_DEFAULTS,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
@@ -1152,35 +1220,10 @@ ipcMain.handle('open-player-window', (event, videoId, videoData, episodeNumber) 
     event.preventDefault();
   });
 
-  if (isDevelopment) {
-    playerWindow.loadURL(`http://localhost:3000/#/video/${videoId}?${query}`);
-  } else {
-    const appPath = app.getAppPath();
-    let indexPath;
-
-    if (app.isPackaged) {
-      indexPath = path.join(appPath, 'src', 'renderer', 'build', 'index.html');
-      if (!fs.existsSync(indexPath)) {
-        indexPath = path.join(appPath, 'renderer', 'build', 'index.html');
-      }
-      if (!fs.existsSync(indexPath)) {
-        indexPath = path.join(appPath, 'build', 'index.html');
-      }
-    } else {
-      indexPath = path.join(__dirname, '..', 'renderer', 'build', 'index.html');
-    }
-
-    playerWindow.loadFile(indexPath).then(() => {
-      playerWindow.webContents.executeJavaScript(`window.location.hash = '#/video/${videoId}?${query}';`);
-    }).catch(err => {
-      console.error('加载视频播放页失败:', err);
-    });
-  }
-
-  if (!playerWindow.isVisible()) {
-    playerWindow.show();
-  }
-  playerWindow.focus();
+  setupPopupWindow(playerWindow);
+  loadRendererRoute(playerWindow, `/video/${videoId}?${query}`).catch(err => {
+    console.error('加载视频播放页失败:', err);
+  });
 
   return playerWindow.id;
 });
@@ -1221,6 +1264,18 @@ ipcMain.handle('get-video-data', (event) => {
     return currentPlayerVideoData;
   }
   return null;
+});
+
+ipcMain.on('get-video-data-sync', (event) => {
+  if (videoWindow && !videoWindow.isDestroyed() && event.sender === videoWindow.webContents) {
+    event.returnValue = currentVideoData || null;
+    return;
+  }
+  if (playerWindow && !playerWindow.isDestroyed() && event.sender === playerWindow.webContents) {
+    event.returnValue = currentPlayerVideoData || null;
+    return;
+  }
+  event.returnValue = null;
 });
 
 // 安全删除文件的辅助函数

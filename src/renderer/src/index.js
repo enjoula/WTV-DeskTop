@@ -7,6 +7,12 @@ import App from './App';
 import ErrorBoundary from './components/ErrorBoundary';
 import reportWebVitals from './reportWebVitals';
 
+try {
+  if ((window.location.hash || '').indexOf('newWindow=true') !== -1) {
+    document.documentElement.classList.add('wtv-popup-window');
+  }
+} catch (_) { /* ignore */ }
+
 const root = ReactDOM.createRoot(document.getElementById('root'));
 root.render(
   <React.StrictMode>
