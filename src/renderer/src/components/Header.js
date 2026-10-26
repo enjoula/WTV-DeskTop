@@ -164,7 +164,7 @@ const Header = () => {
                       {(user?.avatar_url || user?.avatar) && !avatarError ? (
                         <img
                           src={processAvatarUrl(user.avatar_url || user.avatar)}
-                          alt={user?.nickname || user?.username || '用户头像'}
+                          alt={user?.username || '用户头像'}
                           onError={(e) => {
                             console.error('Header头像加载失败:', user.avatar_url || user.avatar);
                             console.error('处理后的URL:', processAvatarUrl(user.avatar_url || user.avatar));
@@ -177,12 +177,12 @@ const Header = () => {
                         />
                       ) : (
                         <span>
-                          {(user?.nickname || user?.username || '用')[0]}
+                          {(user?.username || '用')[0]}
                         </span>
                       )}
                     </div>
                     <span className="user-name">
-                      {user?.nickname || user?.username || '用户'}
+                      {user?.username || '用户'}
                     </span>
                   </div>
                 </button>

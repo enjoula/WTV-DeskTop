@@ -13,8 +13,6 @@ const Profile = () => {
   const navigate = useNavigate();
   const { user, loading, error } = useSelector(state => state.auth);
   const [avatarError, setAvatarError] = useState(false);
-  const [nickname, setNickname] = useState('');
-  const [isEditingNickname, setIsEditingNickname] = useState(false);
   const [showPasswordDialog, setShowPasswordDialog] = useState(false);
   const [avatarUrl, setAvatarUrl] = useState(null);
   const [internalVersion, setInternalVersion] = useState('');
@@ -35,7 +33,6 @@ const Profile = () => {
 
   useEffect(() => {
     if (user) {
-      setNickname(user.nickname || '');
       // 设置头像URL，处理相对路径
       const avatar = user.avatar_url || user.avatar;
       if (avatar) {
@@ -50,56 +47,6 @@ const Profile = () => {
       setAvatarError(false);
     }
   }, [user]);
-
-  // 保存昵称
-  const handleSaveNickname = async () => {
-    try {
-      const response = await updateProfile({ nickname });
-      const resData = response?.data || {};
-      const code = resData.code;
-
-      if (code === 0) {
-        showCenterTip('更新成功');
-        setIsEditingNickname(false);
-      // 重新获取用户信息以更新状态
-      dispatch(fetchCurrentUser());
-      } else if (code === 401) {
-        showCenterTip('账号在其它设备登录，当前设备已下线');
-        setTimeout(() => {
-          dispatch(logoutUser()).then(() => {
-            navigate('/login');
-          });
-        }, 1000);
-      } else if (code === 400) {
-        showCenterTip('昵称和密码至少需要传入一个！');
-      } else if (code === 500) {
-        showCenterTip('更新用户信息失败，请稍后重试');
-      } else {
-        const errorMsg = resData.message || '更新失败，请稍后重试';
-        showCenterTip(errorMsg);
-      }
-    } catch (err) {
-      console.error('更新昵称失败:', err);
-      const resData = err?.response?.data || {};
-      const code = resData.code;
-
-      if (code === 401) {
-        showCenterTip('账号在其它设备登录，当前设备已下线');
-        setTimeout(() => {
-          dispatch(logoutUser()).then(() => {
-            navigate('/login');
-          });
-        }, 1000);
-      } else if (code === 400) {
-        showCenterTip('昵称和密码至少需要传入一个！');
-      } else if (code === 500) {
-        showCenterTip('更新用户信息失败，请稍后重试');
-      } else {
-        const errorMsg = resData.message || err?.message || '更新失败，请稍后重试';
-        showCenterTip(errorMsg);
-      }
-    }
-  };
 
   // 修改密码
   const handleChangePassword = async (newPassword) => {
@@ -268,7 +215,7 @@ const Profile = () => {
                 </div>
               ) : (
                 <div className="avatar-placeholder-modern">
-                  <span className="avatar-initial">{(user?.nickname || user?.username || '用')[0]}</span>
+                  <span className="avatar-initial">{(user?.username || '用')[0]}</span>
                 </div>
               )}
               <button onClick={handleChangeAvatar} className="change-avatar-btn-modern">
@@ -299,39 +246,10 @@ const Profile = () => {
               <div className="info-item-modern">
                 <div className="info-item-label">
                   <span className="info-icon">✏️</span>
-                  <span>昵称</span>
+                  <span>账号</span>
                 </div>
                 <div className="info-item-value">
-                  {isEditingNickname ? (
-                    <div className="nickname-edit-modern">
-                  <input
-                    type="text"
-                        value={nickname}
-                        onChange={(e) => setNickname(e.target.value)}
-                    placeholder="请输入昵称"
-                        className="nickname-input-modern"
-                        autoFocus
-                      />
-                      <div className="nickname-actions-modern">
-                        <button onClick={handleSaveNickname} className="btn-primary-small">
-                          <span>✓</span> 保存
-                        </button>
-                        <button onClick={() => {
-                          setIsEditingNickname(false);
-                          setNickname(user.nickname || '');
-                        }} className="btn-secondary-small">
-                          <span>✕</span> 取消
-                        </button>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="nickname-display-modern">
-                      <span className="info-value-text">{nickname || '未设置'}</span>
-                      <button onClick={() => setIsEditingNickname(true)} className="btn-edit-inline">
-                        <span>✏️</span> 编辑
-                      </button>
-                    </div>
-                  )}
+                  <span className="info-value-text">{user.username || '未知'}</span>
                 </div>
               </div>
               
