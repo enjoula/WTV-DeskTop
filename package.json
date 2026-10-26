@@ -6,7 +6,7 @@
   ],
   "version": "1.1.6",
   "versionCode": 116,
-  "buildDate": "20261014",
+  "buildDate": "20261022",
   "description": "看视频 - WTV Desktop Application",
   "main": "src/main/main.js",
   "scripts": {

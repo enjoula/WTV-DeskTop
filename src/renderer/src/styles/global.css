@@ -424,10 +424,9 @@ body {
 }
 
 .episode-group-tabs {
-  display: flex;
-  gap: 10px;
+  flex: 1;
+  min-width: 0;
   padding: 10px 0 14px;
-  overflow-x: auto;
 }
 
 .episode-group-tab {
@@ -3682,20 +3681,34 @@ video:focus-visible {
   box-shadow: 0 2px 6px rgba(99, 102, 241, 0.2);
 }
 
-/* 分段切换栏 */
-.episode-group-tabs {
+/* 分段切换栏：单行横向滚动；超过 10 组时两侧箭头露出后续 tab */
+.episode-group-tabs-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   width: 100%;
-  overflow-x: auto;
-  overflow-y: visible;
+}
+
+.episode-group-tabs {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+  overflow: hidden;
   padding-bottom: 12px;
   padding-top: 2px;
 }
 
-
 .episode-group-tabs-scroll {
   display: flex;
+  flex-wrap: nowrap;
   gap: 8px;
-  min-width: max-content;
+  width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scroll-behavior: smooth;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(99, 102, 241, 0.35) transparent;
 }
 
 .episode-group-tabs-scroll::-webkit-scrollbar {
@@ -3714,6 +3727,47 @@ video:focus-visible {
 
 .episode-group-tabs-scroll::-webkit-scrollbar-thumb:hover {
   background: rgba(99, 102, 241, 0.5);
+}
+
+.episode-group-nav-arrow {
+  width: 28px;
+  height: 28px;
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  background: rgba(99, 102, 241, 0.08);
+  color: #4f46e5;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: opacity 0.2s, background 0.2s;
+}
+
+.episode-group-nav-arrow:hover:not(:disabled) {
+  background: rgba(99, 102, 241, 0.18);
+}
+
+.episode-group-nav-arrow:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.episode-group-nav-arrow.is-hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.video-episodes-section .episode-group-nav-arrow {
+  border-color: rgba(255, 255, 255, 0.28);
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+.video-episodes-section .episode-group-nav-arrow:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.16);
 }
 
 .episode-group-tab {

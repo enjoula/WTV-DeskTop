@@ -15,6 +15,8 @@ import './App.css';
 
 function App() {
   const appLaunchTimestampRef = React.useRef(Date.now());
+  const versionCodeRef = React.useRef(null);
+  const platformRef = React.useRef(null);
   const [version, setVersion] = React.useState(null);
   const [versionCode, setVersionCode] = React.useState(null);
   const [platform, setPlatform] = React.useState(null);
@@ -325,11 +327,11 @@ function App() {
       });
     }
     
-    // 预初始化平台缓存（用于登录/注册时的device参数）
-    getDevicePlatformAsync().then(platform => {
-      console.log('平台缓存已初始化:', platform);
+    // 预初始化设备标识缓存（登录/注册 device：DeskTop-设备型号）
+    getDevicePlatformAsync().then(device => {
+      console.log('设备标识缓存已初始化:', device);
     }).catch(err => {
-      console.error('初始化平台缓存失败:', err);
+      console.error('初始化设备标识缓存失败:', err);
     });
     
     // 获取 VersionCode（用于版本检测和升级）
@@ -402,6 +404,42 @@ function App() {
         return () => clearTimeout(timer);
     }
   }, [versionCode, platform, handleCheckUpdate]);
+
+  versionCodeRef.current = versionCode;
+  platformRef.current = platform;
+
+  // 用户本次登录成功后 10 秒再检查一次；启动时已有登录态不算登录
+  React.useEffect(() => {
+    let wasAuthenticated = !!store.getState().auth?.isAuthenticated;
+    let timer = null;
+
+    const unsubscribe = store.subscribe(() => {
+      const isAuthenticated = !!store.getState().auth?.isAuthenticated;
+      if (isAuthenticated && !wasAuthenticated) {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => {
+          timer = null;
+          const code = versionCodeRef.current;
+          const currentPlatform = platformRef.current;
+          if (!code || !currentPlatform) {
+            console.log('登录后检查更新：版本信息不完整，跳过');
+            return;
+          }
+          console.log('用户登录 10 秒后，开始检查更新');
+          handleCheckUpdate(code, currentPlatform);
+        }, 10 * 1000);
+      } else if (!isAuthenticated && timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      wasAuthenticated = isAuthenticated;
+    });
+
+    return () => {
+      unsubscribe();
+      if (timer) clearTimeout(timer);
+    };
+  }, [handleCheckUpdate]);
 
   // 下载完成后，根据强制/非强制更新显示不同的弹窗
   React.useEffect(() => {

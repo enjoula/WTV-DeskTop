@@ -243,6 +243,9 @@ const VideoDetail = () => {
   const relatedVideosGridRef = useRef(null);
   const [canScrollRelatedLeft, setCanScrollRelatedLeft] = useState(false);
   const [canScrollRelatedRight, setCanScrollRelatedRight] = useState(false);
+  const episodeGroupTabsRef = useRef(null);
+  const [canScrollEpisodeGroupLeft, setCanScrollEpisodeGroupLeft] = useState(false);
+  const [canScrollEpisodeGroupRight, setCanScrollEpisodeGroupRight] = useState(false);
 
   // 规范化视频信息，确保 cover_url 和 pic 字段一致
   // 规范化视频数据，确保封面图字段一致
@@ -956,13 +959,13 @@ const VideoDetail = () => {
         return (a.episode_number || 0) - (b.episode_number || 0);
       });
       
-      // 判断是否超过20集
+      // 超过20集才分组；超过200集时每组40集（两行），否则每组20集（一行）
       const totalEpisodes = currentSeasonEpisodes.length;
       if (totalEpisodes > 20) {
-        // 每20集为一组
+        const groupSize = totalEpisodes > 200 ? 40 : 20;
         const episodeGroups = [];
-        for (let i = 0; i < currentSeasonEpisodes.length; i += 20) {
-          episodeGroups.push(currentSeasonEpisodes.slice(i, i + 20));
+        for (let i = 0; i < currentSeasonEpisodes.length; i += groupSize) {
+          episodeGroups.push(currentSeasonEpisodes.slice(i, i + groupSize));
         }
         
         // 找到selectedEpisode所在的组
@@ -2392,17 +2395,48 @@ const VideoDetail = () => {
     setCanScrollRelatedRight(maxScrollLeft - grid.scrollLeft > threshold);
   }, []);
 
+  const updateEpisodeGroupScrollState = useCallback(() => {
+    const tabs = episodeGroupTabsRef.current;
+    if (!tabs) {
+      setCanScrollEpisodeGroupLeft(false);
+      setCanScrollEpisodeGroupRight(false);
+      return;
+    }
+    const maxScrollLeft = tabs.scrollWidth - tabs.clientWidth;
+    const threshold = 4;
+    setCanScrollEpisodeGroupLeft(tabs.scrollLeft > threshold);
+    setCanScrollEpisodeGroupRight(maxScrollLeft - tabs.scrollLeft > threshold);
+  }, []);
+
   useEffect(() => {
     updateRelatedScrollState();
   }, [episodes.recommendations, updateRelatedScrollState]);
 
   useEffect(() => {
-    const handleResize = () => updateRelatedScrollState();
+    updateEpisodeGroupScrollState();
+  }, [episodes.data, activeSeason, searchTerm, episodeOrder, activeEpisodeGroup, updateEpisodeGroupScrollState]);
+
+  useEffect(() => {
+    const handleResize = () => {
+      updateRelatedScrollState();
+      updateEpisodeGroupScrollState();
+    };
     window.addEventListener('resize', handleResize);
     return () => {
       window.removeEventListener('resize', handleResize);
     };
-  }, [updateRelatedScrollState]);
+  }, [updateRelatedScrollState, updateEpisodeGroupScrollState]);
+
+  // 当前激活的分组 tab 滚入可视区域（超过 10 组时靠横向滚动露出）
+  useEffect(() => {
+    const tabs = episodeGroupTabsRef.current;
+    if (!tabs) return;
+    const activeTab = tabs.querySelector('.episode-group-tab.active');
+    if (activeTab && typeof activeTab.scrollIntoView === 'function') {
+      activeTab.scrollIntoView({ behavior: 'smooth', inline: 'nearest', block: 'nearest' });
+    }
+    updateEpisodeGroupScrollState();
+  }, [activeEpisodeGroup, selectedEpisode, updateEpisodeGroupScrollState]);
 
   useEffect(() => {
     if (!isPlayerWindow || !videoInfo || hasAutoPlayFromPlayerWindowRef.current) {
@@ -3334,18 +3368,18 @@ const VideoDetail = () => {
       });
     }
     
-    // 判断是否超过20集
+    // 超过20集才显示分组 tab；超过200集时每组40集（两行），否则每组20集（一行）
     const totalEpisodes = currentSeasonEpisodes.length;
     const shouldShowGroupTabs = totalEpisodes > 20;
+    const episodeGroupSize = totalEpisodes > 200 ? 40 : 20;
     
-    // 每20集为一组（仅在超过20集时使用）
     const episodeGroups = [];
     let currentGroup = [];
     let validGroupIndex = 0;
     
     if (shouldShowGroupTabs) {
-      for (let i = 0; i < currentSeasonEpisodes.length; i += 20) {
-        episodeGroups.push(currentSeasonEpisodes.slice(i, i + 20));
+      for (let i = 0; i < currentSeasonEpisodes.length; i += episodeGroupSize) {
+        episodeGroups.push(currentSeasonEpisodes.slice(i, i + episodeGroupSize));
       }
       // 确保activeEpisodeGroup在有效范围内
       validGroupIndex = Math.min(activeEpisodeGroup, episodeGroups.length - 1);
@@ -3354,6 +3388,17 @@ const VideoDetail = () => {
       // 不超过20集，直接显示所有集数
       currentGroup = currentSeasonEpisodes;
     }
+
+    // 超过 10 组时显示左右箭头，横向滚动露出后续分组
+    const shouldShowGroupScrollArrows = shouldShowGroupTabs && episodeGroups.length > 10;
+
+    const scrollEpisodeGroups = (direction = 1) => {
+      const tabs = episodeGroupTabsRef.current;
+      if (!tabs) return;
+      const distance = Math.max(240, Math.floor(tabs.clientWidth * 0.75));
+      tabs.scrollBy({ left: direction * distance, behavior: 'smooth' });
+      setTimeout(updateEpisodeGroupScrollState, 260);
+    };
 
     return (
       <div className="episode-list-sidebar">
@@ -3375,13 +3420,29 @@ const VideoDetail = () => {
           </button>
         </div>
         
-        {/* 分段切换栏 - 仅在超过20集时显示 */}
+        {/* 分段切换栏 - 仅在超过20集时显示；超过10组时两侧箭头滚动加载后续 tab */}
         {shouldShowGroupTabs && (
+          <div className="episode-group-tabs-row">
+            {shouldShowGroupScrollArrows && (
+              <button
+                type="button"
+                className={`episode-group-nav-arrow episode-group-nav-arrow-left ${canScrollEpisodeGroupLeft ? '' : 'is-hidden'}`}
+                onClick={() => scrollEpisodeGroups(-1)}
+                aria-label="向左查看分组"
+                disabled={!canScrollEpisodeGroupLeft}
+              >
+                ‹
+              </button>
+            )}
             <div className="episode-group-tabs">
-              <div className="episode-group-tabs-scroll">
+              <div
+                className="episode-group-tabs-scroll"
+                ref={episodeGroupTabsRef}
+                onScroll={updateEpisodeGroupScrollState}
+              >
               {episodeGroups.map((group, groupIndex) => {
-                const startNum = group[0]?.episode_number || (groupIndex * 20 + 1);
-                const endNum = group[group.length - 1]?.episode_number || (groupIndex * 20 + group.length);
+                const startNum = group[0]?.episode_number || (groupIndex * episodeGroupSize + 1);
+                const endNum = group[group.length - 1]?.episode_number || (groupIndex * episodeGroupSize + group.length);
                 
                 // 计算当前应该激活的组：如果selectedEpisode存在，找到它所在的组；否则使用activeEpisodeGroup
                 let activeGroupIndex = activeEpisodeGroup;
@@ -3418,6 +3479,18 @@ const VideoDetail = () => {
               })}
               </div>
             </div>
+            {shouldShowGroupScrollArrows && (
+              <button
+                type="button"
+                className={`episode-group-nav-arrow episode-group-nav-arrow-right ${canScrollEpisodeGroupRight ? '' : 'is-hidden'}`}
+                onClick={() => scrollEpisodeGroups(1)}
+                aria-label="向右查看分组"
+                disabled={!canScrollEpisodeGroupRight}
+              >
+                ›
+              </button>
+            )}
+          </div>
         )}
         
         {/* 集数网格 */}
