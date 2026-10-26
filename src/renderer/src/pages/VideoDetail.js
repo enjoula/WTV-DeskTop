@@ -3100,6 +3100,53 @@ const VideoDetail = () => {
     return typeof unsubscribe === 'function' ? unsubscribe : undefined;
   }, []);
 
+  // 全屏状态下按 Esc 强制退出（Electron 窗口全屏 + 文档全屏都覆盖）
+  useEffect(() => {
+    const exitFullscreenByEsc = async () => {
+      if (!isFullscreenRef.current) return;
+      if (Date.now() < ignoreEscUntilRef.current) return;
+
+      pendingRestoreFullscreenRef.current = false;
+      suppressFullscreenExitRef.current = false;
+      isFullscreenRef.current = false;
+      setIsFullscreen(false);
+
+      try {
+        if (window.electronAPI?.isFullScreen && window.electronAPI?.setFullScreen) {
+          const currentlyFull = !!(await window.electronAPI.isFullScreen());
+          if (currentlyFull) {
+            await window.electronAPI.setFullScreen(false);
+          }
+        }
+      } catch (_) { /* ignore */ }
+
+      try {
+        if (document.fullscreenElement || document.webkitFullscreenElement) {
+          if (document.exitFullscreen) await document.exitFullscreen();
+          else if (document.webkitExitFullscreen) await document.webkitExitFullscreen();
+        }
+      } catch (_) { /* ignore */ }
+
+      window.setTimeout(() => {
+        try {
+          playerRefInternal.current?.resize?.();
+        } catch (_) { /* ignore */ }
+      }, 80);
+    };
+
+    const onKeyDown = (event) => {
+      if (event.key !== 'Escape' && event.code !== 'Escape') return;
+      if (!isFullscreenRef.current) return;
+      // 阻止其它逻辑吞掉 Esc；只退出全屏，不切换
+      event.preventDefault();
+      event.stopPropagation();
+      exitFullscreenByEsc();
+    };
+
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
+  }, []);
+
   // 后台详情窗 / 主窗口：跟随播放窗当前集，保持选中态与标题一致
   useEffect(() => {
     if (isPlayerWindow || !window.electronAPI?.onPlayerEpisodeChanged) return undefined;

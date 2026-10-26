@@ -5109,6 +5109,68 @@ video:focus-visible {
   user-select: none;
 }
 
+/* 未开播 / 非 playing 时也显示底部控制栏，保证全屏按钮可见。
+   art-bottom 是整层覆盖，必须 pointer-events:none，否则会挡住画面点击续播；
+   只让底部 controls / progress 接收点击。 */
+.art-video-player:not(.art-playing) .art-bottom {
+  opacity: 1 !important;
+  pointer-events: none !important;
+}
+
+.art-video-player:not(.art-playing) .art-bottom .art-controls,
+.art-video-player:not(.art-playing) .art-bottom .art-progress {
+  transform: translateY(0) !important;
+  pointer-events: auto !important;
+}
+
+/* 播放控制栏：全屏图标按钮（进入 / 退出两态，靠 .is-fullscreen 切换） */
+.art-controls .wtv-css-fs-control,
+.art-control-wtv-css-fullscreen {
+  display: flex !important;
+  align-items: center;
+  justify-content: center;
+}
+
+.wtv-css-fs-icons {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  position: relative;
+}
+
+.wtv-css-fs-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  color: #fff;
+  line-height: 0;
+}
+
+.wtv-css-fs-icon svg {
+  display: block;
+  width: 22px;
+  height: 22px;
+}
+
+.wtv-css-fs-control .wtv-css-fs-exit,
+.art-control-wtv-css-fullscreen .wtv-css-fs-exit {
+  display: none;
+}
+
+.wtv-css-fs-control.is-fullscreen .wtv-css-fs-enter,
+.art-control-wtv-css-fullscreen.is-fullscreen .wtv-css-fs-enter {
+  display: none;
+}
+
+.wtv-css-fs-control.is-fullscreen .wtv-css-fs-exit,
+.art-control-wtv-css-fullscreen.is-fullscreen .wtv-css-fs-exit {
+  display: inline-flex;
+}
+
 .art-controls .is-disabled .wtv-next-episode-btn {
   opacity: 0.45;
   background: rgba(255, 255, 255, 0.08);

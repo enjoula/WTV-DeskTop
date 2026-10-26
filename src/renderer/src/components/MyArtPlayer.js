@@ -47,14 +47,27 @@ class CustomHlsJsLoader extends Hls.DefaultConfig.loader {
   }
 }
 
-// ─── 从 localStorage 读取去广告开关，默认开启
-function readBlockAdSetting() {
-  try {
-    const v = localStorage.getItem('enable_blockad');
-    return v !== null ? v === 'true' : true;
-  } catch (_) {
-    return true;
-  }
+/** 控制栏全屏图标：同时放入进入/退出两态，用 .is-fullscreen 切换显示 */
+function getFullscreenControlHtml() {
+  return `<span class="wtv-css-fs-icons" aria-hidden="true">
+    <i class="art-icon wtv-css-fs-icon wtv-css-fs-enter">
+      <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 22 22">
+        <path fill="currentColor" d="M3 8V3h5v2H5v3H3zm11-5h5v5h-2V5h-3V3zM5 14v3h3v2H3v-5h2zm14 0v5h-5v-2h3v-3h2z"/>
+      </svg>
+    </i>
+    <i class="art-icon wtv-css-fs-icon wtv-css-fs-exit">
+      <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 22 22">
+        <path fill="currentColor" d="M8 3v5H3V6h3V3h2zm6 0h2v3h3v2h-5V3zM3 14h5v5H6v-3H3v-2zm11 0h5v2h-3v3h-2v-5z"/>
+      </svg>
+    </i>
+  </span>`;
+}
+
+function syncFullscreenControlDom(controlEl, isFullscreen) {
+  if (!controlEl) return;
+  controlEl.classList.toggle('is-fullscreen', !!isFullscreen);
+  controlEl.classList.add('wtv-css-fs-control');
+  controlEl.style.display = 'flex';
 }
 
 // ─── 片头/片尾跳过配置（参考 LunaTV SkipConfig）
@@ -185,16 +198,6 @@ const MyArtPlayer = forwardRef(({
   /** 合并 ArtPlayer ended 与 <video ended>，并防抖，避免连播逻辑不触发或触发两次 */
   const lastPlaybackEndedAtRef = useRef(0);
 
-  // ─── 去广告开关（参考 LunaTV blockAdEnabled）
-  // 存储在 localStorage 的 enable_blockad 键，默认 true
-  const [blockAdEnabled, setBlockAdEnabled] = useState(readBlockAdSetting);
-  const blockAdEnabledRef = useRef(blockAdEnabled);
-  // 该 effect 仅在 url 或去广告开关变化时重建播放器，其余参数由后续同步 effect 处理
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => {
-    blockAdEnabledRef.current = blockAdEnabled;
-  }, [blockAdEnabled]);
-
   useEffect(() => {
     autoNextEpisodeRef.current = autoNextEpisode;
   }, [autoNextEpisode]);
@@ -293,6 +296,7 @@ const MyArtPlayer = forwardRef(({
 
   // 切换广告过滤时保存当前播放位置，重建后恢复（LunaTV 不做此处理，这里体验更好）
   const pendingResumeRef = useRef(null);
+  const fullscreenControlElRef = useRef(null);
 
   // ─── 片头/片尾跳过（参考 LunaTV SkipConfig + timeupdate 逻辑）
   const skipConfigRef = useRef(readSkipConfig(videoId));
@@ -455,7 +459,8 @@ const MyArtPlayer = forwardRef(({
       screenshot: true,
       setting: true,
       hotkey: true,
-      pip: true,
+      // 控制栏不放画中画按钮；设置面板保留画中画入口
+      pip: false,
       mutex: true,
       // 关闭 ArtPlayer 内置原生全屏（会走 HTML Fullscreen / 窗口全屏）。
       // 全屏由业务层 CSS 全屏 + 下方自定义按钮接管。
@@ -491,10 +496,8 @@ const MyArtPlayer = forwardRef(({
 
             const buildHlsConfig = () => {
               return {
-                // ─── 核心：根据 blockAdEnabled 决定是否使用过滤 Loader（与 LunaTV 完全一致）
-                loader: blockAdEnabledRef.current
-                  ? CustomHlsJsLoader
-                  : HlsClass.DefaultConfig.loader,
+                // 去广告常开：始终使用过滤 Loader
+                loader: CustomHlsJsLoader,
                 // Electron 下 Worker 偶发静默停住后不再拉分片，主线程更稳
                 enableWorker: false,
                 lowLatencyMode: false,
@@ -962,7 +965,7 @@ const MyArtPlayer = forwardRef(({
         }
         rateGate.setTarget(initialTarget);
 
-        // 恢复切换去广告前的播放进度
+        // 恢复重建前记录的播放进度（如有）
         if (pendingResumeRef.current !== null) {
           const t = pendingResumeRef.current;
           pendingResumeRef.current = null;
@@ -1110,47 +1113,7 @@ const MyArtPlayer = forwardRef(({
         console.error('ArtPlayer 播放速度设置项初始化失败:', e);
       }
 
-      // ─── 在 ArtPlayer 设置菜单中添加"去广告"开关（参考 LunaTV 设置菜单逻辑）
-      // 用户可在播放器内随时切换；切换后销毁并重建播放器以使新 loader 生效
-      try {
-        art.setting.add({
-          name: '去广告',
-          html: '去广告',
-          tooltip: blockAdEnabledRef.current ? '已开启' : '已关闭',
-          switch: blockAdEnabledRef.current,
-          onSwitch: function (item) {
-            const newVal = !item.switch;
-            // 保存当前播放进度，重建后恢复
-            pendingResumeRef.current = art.currentTime || 0;
-            // 持久化到 localStorage（与 LunaTV enable_blockad 键名一致）
-            try { localStorage.setItem('enable_blockad', String(newVal)); } catch (_) { /* ignore */ }
-            // 更新 ref（立即生效，避免闭包读旧值）
-            blockAdEnabledRef.current = newVal;
-            // 更新 state → 触发 useEffect([url, blockAdEnabled]) → 重建播放器
-            setBlockAdEnabled(newVal);
-            return newVal;
-          },
-        });
-      } catch (e) {
-        console.error('ArtPlayer 去广告设置项初始化失败:', e);
-      }
-
-      // ─── 原生设置面板：全屏
-      try {
-        art.setting.add({
-          name: 'wtv-fullscreen',
-          html: '全屏',
-          tooltip: isFullscreenRef.current ? '退出全屏' : '进入全屏',
-          onClick: async function () {
-            if (onToggleFullscreenRef.current) {
-              await onToggleFullscreenRef.current();
-            }
-            return isFullscreenRef.current ? '退出全屏' : '进入全屏';
-          },
-        });
-      } catch (e) {
-        console.error('ArtPlayer 全屏设置项初始化失败:', e);
-      }
+      // 去广告常开、全屏走控制栏图标；设置面板保留画中画
 
       // ─── 原生设置面板：画中画
       try {
@@ -1265,24 +1228,55 @@ const MyArtPlayer = forwardRef(({
         }, 100);
       }
 
-      // 自定义全屏按钮：只走业务层 CSS 全屏，绝不触发 ArtPlayer/HTML 原生全屏
+      // 自定义全屏图标按钮：播放中 / 未开始都显示；只走业务层全屏，不触发原生全屏
       try {
         art.controls.add({
           name: 'wtv-css-fullscreen',
           position: 'right',
           index: 80,
-          html: `<span class="wtv-css-fs-btn">${isFullscreenRef.current ? '退出' : '全屏'}</span>`,
+          html: getFullscreenControlHtml(),
           tooltip: isFullscreenRef.current ? '退出全屏' : '全屏',
+          style: {
+            display: 'flex',
+          },
           click: () => {
             if (onToggleFullscreenRef.current) {
               onToggleFullscreenRef.current();
             }
             return false;
           },
+          mounted: ($control) => {
+            fullscreenControlElRef.current = $control || null;
+            syncFullscreenControlDom($control, isFullscreenRef.current);
+          },
+        });
+        // mounted 可能晚于当前帧；兜底再同步一次
+        requestAnimationFrame(() => {
+          const control = art.controls?.find?.('wtv-css-fullscreen');
+          const el = control?.$ref || fullscreenControlElRef.current;
+          if (el) {
+            fullscreenControlElRef.current = el;
+            // 若 html 尚未带双态图标，补一次
+            if (!el.querySelector?.('.wtv-css-fs-icons')) {
+              el.innerHTML = getFullscreenControlHtml();
+            }
+            syncFullscreenControlDom(el, isFullscreenRef.current);
+          }
         });
       } catch (e) {
         console.error('添加 CSS 全屏按钮失败:', e);
       }
+
+      // 未开播 / 暂停时保持控制栏可见，确保全屏按钮始终能点到
+      const ensureControlsVisible = () => {
+        try {
+          art.controls.show = true;
+        } catch (_) { /* ignore */ }
+      };
+      ensureControlsVisible();
+      art.on('video:pause', ensureControlsVisible);
+      art.on('video:canplay', ensureControlsVisible);
+      art.on('ready', ensureControlsVisible);
 
       if (onReadyRef.current) onReadyRef.current();
     };
@@ -1304,10 +1298,11 @@ const MyArtPlayer = forwardRef(({
       teardownPlayer(artInstanceRef.current, hlsInstanceRef.current);
       artInstanceRef.current = null;
       hlsInstanceRef.current = null;
+      fullscreenControlElRef.current = null;
       silenceAllPageMedia();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [url, blockAdEnabled]); // ← blockAdEnabled 变化时重建播放器（与 LunaTV 一致）
+  }, [url]);
 
   // 同步播放状态
   useEffect(() => {
@@ -1369,26 +1364,32 @@ const MyArtPlayer = forwardRef(({
     } catch (_) { /* ignore */ }
   }, [autoNextEpisode]);
 
-  // 同步“全屏”设置项提示与控制栏图标
+  // 同步控制栏全屏图标按钮状态（用 class 切换两态，避免替换 innerHTML 无效）
   useEffect(() => {
     isFullscreenRef.current = isFullscreen;
     if (!artInstanceRef.current) return;
     try {
-      const item = artInstanceRef.current.setting?.find?.('wtv-fullscreen');
-      if (item) {
-        item.tooltip = isFullscreen ? '退出全屏' : '进入全屏';
-      }
       const control = artInstanceRef.current.controls?.find?.('wtv-css-fullscreen');
-      if (control?.$ref) {
-        control.$ref.innerHTML = `<span class="wtv-css-fs-btn">${isFullscreen ? '退出' : '全屏'}</span>`;
+      const el = fullscreenControlElRef.current || control?.$ref || null;
+      if (el) {
+        fullscreenControlElRef.current = el;
+        if (!el.querySelector?.('.wtv-css-fs-icons')) {
+          el.innerHTML = getFullscreenControlHtml();
+        }
+        syncFullscreenControlDom(el, isFullscreen);
       }
       if (control) {
         control.tooltip = isFullscreen ? '退出全屏' : '全屏';
       }
+      // ArtPlayer tooltip 文案有时挂在 DOM title / data 上，一并更新
+      if (el) {
+        el.setAttribute('data-tooltip', isFullscreen ? '退出全屏' : '全屏');
+        el.setAttribute('aria-label', isFullscreen ? '退出全屏' : '全屏');
+      }
     } catch (_) { /* ignore */ }
   }, [isFullscreen]);
 
-  // 同步“画中画”设置项提示
+  // 同步设置里的画中画提示
   useEffect(() => {
     isPictureInPictureRef.current = isPictureInPicture;
     pictureInPictureEnabledRef.current = pictureInPictureEnabled;
