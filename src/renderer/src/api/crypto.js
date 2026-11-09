@@ -1,5 +1,8 @@
 // 写接口 + 所有鉴权接口加密并签名；公开 GET（片库列表等）保持明文。
+// http://局域网 IP 等非安全上下文没有 crypto.subtle，自动降级到 node-forge。
 // 协议见 Service/video_service/docs/ENCRYPTION.md
+
+import forge from 'node-forge';
 
 const ENCRYPT_VERSION = '1';
 const ENCRYPT_KID = 'v1';
@@ -40,7 +43,13 @@ IQIDAQAB
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
-let publicKeyPromise;
+let subtlePublicKeyPromise;
+let forgePublicKey;
+
+function getSubtle() {
+  const root = typeof window !== 'undefined' ? window : null;
+  return (root && root.crypto && root.crypto.subtle) ? root.crypto.subtle : null;
+}
 
 function bytesToB64(bytes) {
   let binary = '';
@@ -62,6 +71,22 @@ function b64ToBytes(value) {
 
 function bufToHex(buffer) {
   return [...new Uint8Array(buffer)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+function bytesToBinary(bytes) {
+  let out = '';
+  for (let i = 0; i < bytes.length; i += 1) {
+    out += String.fromCharCode(bytes[i]);
+  }
+  return out;
+}
+
+function binaryToBytes(binary) {
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    out[i] = binary.charCodeAt(i);
+  }
+  return out;
 }
 
 function escapeString(value) {
@@ -107,18 +132,36 @@ export function canonicalJSON(value) {
   return stringify(value);
 }
 
-function randomNonce() {
-  const bytes = crypto.getRandomValues(new Uint8Array(16));
-  return bufToHex(bytes);
+function randomBytes(length) {
+  const bytes = new Uint8Array(length);
+  const root = typeof window !== 'undefined' ? window : null;
+  if (root && root.crypto?.getRandomValues) {
+    root.crypto.getRandomValues(bytes);
+    return bytes;
+  }
+  return binaryToBytes(forge.random.getBytesSync(length));
 }
 
-async function getPublicKey() {
-  if (!publicKeyPromise) {
+function randomNonce() {
+  return bufToHex(randomBytes(16));
+}
+
+function getForgePublicKey() {
+  if (!forgePublicKey) {
+    forgePublicKey = forge.pki.publicKeyFromPem(RSA_PUBLIC_KEY_PEM);
+  }
+  return forgePublicKey;
+}
+
+async function getSubtlePublicKey() {
+  const subtle = getSubtle();
+  if (!subtle) return null;
+  if (!subtlePublicKeyPromise) {
     const b64 = RSA_PUBLIC_KEY_PEM
       .replace('-----BEGIN PUBLIC KEY-----', '')
       .replace('-----END PUBLIC KEY-----', '')
       .replace(/\s+/g, '');
-    publicKeyPromise = crypto.subtle.importKey(
+    subtlePublicKeyPromise = subtle.importKey(
       'spki',
       b64ToBytes(b64),
       { name: 'RSA-OAEP', hash: 'SHA-256' },
@@ -126,37 +169,102 @@ async function getPublicKey() {
       ['encrypt'],
     );
   }
-  return publicKeyPromise;
+  return subtlePublicKeyPromise;
+}
+
+function signHexForge(canonical, timestamp, nonce) {
+  const message = `${canonical}&timestamp=${timestamp}&nonce=${nonce}&salt=${ENCRYPT_SALT}`;
+  const hmac = forge.hmac.create();
+  hmac.start('sha256', ENCRYPT_SALT);
+  hmac.update(message);
+  return hmac.digest().toHex();
 }
 
 export async function signHex(canonical, timestamp, nonce) {
+  const subtle = getSubtle();
+  if (!subtle) {
+    return signHexForge(canonical, timestamp, nonce);
+  }
   const message = `${canonical}&timestamp=${timestamp}&nonce=${nonce}&salt=${ENCRYPT_SALT}`;
-  const key = await crypto.subtle.importKey(
+  const key = await subtle.importKey(
     'raw',
     textEncoder.encode(ENCRYPT_SALT),
     { name: 'HMAC', hash: 'SHA-256' },
     false,
     ['sign'],
   );
-  const sig = await crypto.subtle.sign('HMAC', key, textEncoder.encode(message));
+  const sig = await subtle.sign('HMAC', key, textEncoder.encode(message));
   return bufToHex(sig);
+}
+
+function aesGcmEncryptForge(aesKey, iv, plainBytes) {
+  const cipher = forge.cipher.createCipher('AES-GCM', bytesToBinary(aesKey));
+  cipher.start({
+    iv: bytesToBinary(iv),
+    tagLength: 128,
+  });
+  cipher.update(forge.util.createBuffer(bytesToBinary(plainBytes)));
+  if (!cipher.finish()) {
+    throw new Error('AES-GCM encrypt failed');
+  }
+  return binaryToBytes(cipher.output.getBytes() + cipher.mode.tag.getBytes());
+}
+
+function aesGcmDecryptForge(aesKey, iv, cipherBytes) {
+  if (cipherBytes.length < 16) {
+    throw new Error('ciphertext too short');
+  }
+  const data = cipherBytes.subarray(0, cipherBytes.length - 16);
+  const tag = cipherBytes.subarray(cipherBytes.length - 16);
+  const decipher = forge.cipher.createDecipher('AES-GCM', bytesToBinary(aesKey));
+  decipher.start({
+    iv: bytesToBinary(iv),
+    tagLength: 128,
+    tag: bytesToBinary(tag),
+  });
+  decipher.update(forge.util.createBuffer(bytesToBinary(data)));
+  if (!decipher.finish()) {
+    throw new Error('AES-GCM decrypt failed');
+  }
+  return binaryToBytes(decipher.output.getBytes());
+}
+
+function rsaEncryptForge(aesKey) {
+  const encrypted = getForgePublicKey().encrypt(bytesToBinary(aesKey), 'RSA-OAEP', {
+    md: forge.md.sha256.create(),
+    mgf1: {
+      md: forge.md.sha256.create(),
+    },
+  });
+  return binaryToBytes(encrypted);
 }
 
 async function seal(value) {
   const plain = canonicalJSON(value);
-  const aesKey = crypto.getRandomValues(new Uint8Array(16));
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const aesCryptoKey = await crypto.subtle.importKey('raw', aesKey, { name: 'AES-GCM' }, false, ['encrypt']);
-  const ciphertext = new Uint8Array(await crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv, tagLength: 128 },
-    aesCryptoKey,
-    textEncoder.encode(plain),
-  ));
-  const encryptedKey = new Uint8Array(await crypto.subtle.encrypt(
-    { name: 'RSA-OAEP' },
-    await getPublicKey(),
-    aesKey,
-  ));
+  const aesKey = randomBytes(16);
+  const iv = randomBytes(12);
+  const plainBytes = textEncoder.encode(plain);
+  const subtle = getSubtle();
+
+  let ciphertext;
+  let encryptedKey;
+  if (subtle) {
+    const aesCryptoKey = await subtle.importKey('raw', aesKey, { name: 'AES-GCM' }, false, ['encrypt']);
+    ciphertext = new Uint8Array(await subtle.encrypt(
+      { name: 'AES-GCM', iv, tagLength: 128 },
+      aesCryptoKey,
+      plainBytes,
+    ));
+    encryptedKey = new Uint8Array(await subtle.encrypt(
+      { name: 'RSA-OAEP' },
+      await getSubtlePublicKey(),
+      aesKey,
+    ));
+  } else {
+    ciphertext = aesGcmEncryptForge(aesKey, iv, plainBytes);
+    encryptedKey = rsaEncryptForge(aesKey);
+  }
+
   const timestamp = String(Math.floor(Date.now() / 1000));
   const nonce = randomNonce();
   const sign = await signHex(plain, timestamp, nonce);
@@ -180,12 +288,17 @@ async function seal(value) {
 export async function openJson(aesKey, envelope) {
   const iv = b64ToBytes(envelope.iv);
   const ciphertext = b64ToBytes(envelope.ciphertext);
-  const key = await crypto.subtle.importKey('raw', aesKey, { name: 'AES-GCM' }, false, ['decrypt']);
-  const plain = await crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv, tagLength: 128 },
-    key,
-    ciphertext,
-  );
+  const subtle = getSubtle();
+  if (subtle) {
+    const key = await subtle.importKey('raw', aesKey, { name: 'AES-GCM' }, false, ['decrypt']);
+    const plain = await subtle.decrypt(
+      { name: 'AES-GCM', iv, tagLength: 128 },
+      key,
+      ciphertext,
+    );
+    return JSON.parse(textDecoder.decode(plain));
+  }
+  const plain = aesGcmDecryptForge(aesKey, iv, ciphertext);
   return JSON.parse(textDecoder.decode(plain));
 }
 
@@ -248,11 +361,21 @@ export async function encryptConfig(config) {
   const payload = payloadFromData(config.data);
   if (payload === undefined) return config;
   const sealed = await seal(payload);
-  config.data = sealed.body;
   config.cryptoAesKey = sealed.aesKey;
-  // 鉴权 GET/DELETE 也带加密 Body（通常为 {}），用于协商 AES Key 并加密响应
-  setHeader(config, 'Content-Type', 'application/json');
   Object.entries(sealed.headers).forEach(([name, value]) => setHeader(config, name, value));
+
+  const method = String(config.method || 'get').toLowerCase();
+  // 浏览器 axios 不会发送 GET/HEAD Body，鉴权 GET 的信封改走 Header
+  if (method === 'get' || method === 'head') {
+    config.data = undefined;
+    setHeader(config, 'X-Encrypted-Key', sealed.body.encrypted_key);
+    setHeader(config, 'X-Encrypt-IV', sealed.body.iv);
+    setHeader(config, 'X-Encrypt-Ciphertext', sealed.body.ciphertext);
+    return config;
+  }
+
+  config.data = sealed.body;
+  setHeader(config, 'Content-Type', 'application/json');
   return config;
 }
 
