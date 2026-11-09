@@ -18,7 +18,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getVersionCode: () => ipcRenderer.invoke('get-version-code'),
   getInternalVersion: () => ipcRenderer.invoke('get-internal-version'),
   getPlatform: () => ipcRenderer.invoke('get-platform'),
-  /** 登录/注册 device：DeskTop-设备型号，如 DeskTop-MacBook-Arm */
+  /** 登录/注册 device：DeskTop-Mac-ARM / DeskTop-Mac-Intel / DeskTop-Win / DeskTop-Linux */
   getDevice: () => ipcRenderer.invoke('get-device'),
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
   openVideoWindow: (videoId, videoData) => ipcRenderer.invoke('open-video-window', videoId, videoData),

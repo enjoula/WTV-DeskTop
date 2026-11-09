@@ -1,28 +1,15 @@
 // utils/platform.js
-// 登录/注册 device：约定「平台-设备型号」
-// 例：DeskTop-windows11、DeskTop-MacBook-Arm、DeskTop-MacMini-Arm、DeskTop-Ubuntu22
+// 登录/注册 device（API 枚举）：
+// Mac：DeskTop-Mac-ARM / DeskTop-Mac-Intel；Windows：DeskTop-Win；Linux：DeskTop-Linux
 
 // 设备标识缓存（应用启动时异步获取）
 let deviceCache = null;
 let devicePromise = null;
 
-const DEFAULT_DEVICE = 'DeskTop-windows10';
+const DEFAULT_DEVICE = 'DeskTop-Win';
 
 /**
- * 从 userAgent / platform 文本推断 Mac 机型家族
- */
-function resolveMacModelFamily(text) {
-  const value = String(text || '');
-  if (/macbook/i.test(value)) return 'MacBook';
-  if (/mac\s*mini|macmini/i.test(value)) return 'MacMini';
-  if (/mac\s*studio|macstudio/i.test(value)) return 'MacStudio';
-  if (/mac\s*pro|macpro/i.test(value)) return 'MacPro';
-  if (/imac/i.test(value)) return 'iMac';
-  return null;
-}
-
-/**
- * 浏览器环境下的后备 device 标识（不够精确）
+ * 浏览器环境下的后备 device 标识
  */
 function detectDeviceFromNavigator() {
   if (typeof navigator === 'undefined') {
@@ -36,24 +23,19 @@ function detectDeviceFromNavigator() {
 
   // macOS
   if (/Mac|iPhone|iPod|iPad/i.test(combined) || navPlatform.includes('Mac')) {
-    const family = resolveMacModelFamily(combined) || 'Mac';
     const isArm =
       /arm|aarch64|apple silicon/i.test(combined) ||
       (typeof navigator !== 'undefined' && navigator.userAgentData?.architecture === 'arm');
-    return `DeskTop-${family}-${isArm ? 'Arm' : 'Intel'}`;
+    return isArm ? 'DeskTop-Mac-ARM' : 'DeskTop-Mac-Intel';
   }
 
-  // Windows：NT 10.0 无法可靠区分 10/11，优先 11 关键字
+  // Windows
   if (/Win/i.test(combined) || navPlatform.includes('Win')) {
-    if (/Windows NT 6\.1|Windows 7/i.test(userAgent)) return 'DeskTop-windows7';
-    if (/Windows NT 6\.[23]|Windows 8/i.test(userAgent)) return 'DeskTop-windows8';
-    if (/Windows 11/i.test(userAgent)) return 'DeskTop-windows11';
-    return 'DeskTop-windows10';
+    return 'DeskTop-Win';
   }
 
   // Linux
   if (/Linux/i.test(combined) || navPlatform.includes('Linux')) {
-    if (/Ubuntu/i.test(userAgent)) return 'DeskTop-Ubuntu';
     return 'DeskTop-Linux';
   }
 
@@ -62,7 +44,7 @@ function detectDeviceFromNavigator() {
 
 /**
  * 异步获取登录/注册用的 device 标识
- * @returns {Promise<string>} 如 DeskTop-MacBook-Arm、DeskTop-windows11
+ * @returns {Promise<string>} DeskTop-Mac-ARM / DeskTop-Mac-Intel / DeskTop-Win / DeskTop-Linux
  */
 export async function getDevicePlatformAsync() {
   if (deviceCache) {
@@ -90,7 +72,7 @@ export async function getDevicePlatformAsync() {
           }
         }
 
-        // 兼容旧版：仅有 getPlatform 时做粗映射（更新检查用的 DeskTop-Mac-ARM 等）
+        // 兼容旧版：仅有 getPlatform 时做粗映射
         if (typeof window.electronAPI.getPlatform === 'function') {
           try {
             const raw = await window.electronAPI.getPlatform();
@@ -98,10 +80,10 @@ export async function getDevicePlatformAsync() {
               const lower = raw.toLowerCase();
               let device = DEFAULT_DEVICE;
               if (lower.includes('mac')) {
-                const arch = lower.includes('arm') || lower.includes('apple') ? 'Arm' : 'Intel';
-                device = `DeskTop-Mac-${arch}`;
+                const isArm = lower.includes('arm') || lower.includes('apple');
+                device = isArm ? 'DeskTop-Mac-ARM' : 'DeskTop-Mac-Intel';
               } else if (lower.includes('win')) {
-                device = 'DeskTop-windows10';
+                device = 'DeskTop-Win';
               } else if (lower.includes('linux')) {
                 device = 'DeskTop-Linux';
               }

@@ -3,6 +3,7 @@ import Artplayer from 'artplayer';
 import Hls from 'hls.js';
 import { destroyHlsInstance, silenceAllPageMedia, stopMediaElement } from '../utils/mediaCleanup';
 import { HLS_LOCK_HIGHEST_CONFIG, lockHlsHighestLevel } from '../utils/hlsQuality';
+import { FilterLevel, filterM3u8Ads } from '../utils/m3u8AdFilter';
 
 /** 全局只允许一路 HLS/ArtPlayer，防止切片后旧实例继续出声 */
 let liveArtPlayer = null;
@@ -16,18 +17,14 @@ if (typeof Artplayer !== 'undefined') {
   Artplayer.PLAYBACK_RATE = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
 }
 
-// ─── 去广告：过滤 M3U8 中的 #EXT-X-DISCONTINUITY 标记（广告分段分界点）
-// 与 LunaTV 逻辑完全一致：只删除标记行本身，HLS.js 会将相邻片段视为连续流
-function filterAdsFromM3U8(m3u8Content) {
-  if (!m3u8Content) return '';
-  return m3u8Content
-    .split('\n')
-    .filter(line => !line.includes('#EXT-X-DISCONTINUITY'))
-    .join('\n');
+// ─── 去广告：对齐 Android M3u8Filter STRONG
+// 旧逻辑只剥 DISCONTINUITY，且密铺源整单跳过 → 广告仍播 / seek 错乱。
+// 现剔除广告分片（DISC pod / URI / CUE / 极短垫片 / 密铺 30fps midroll 等）。
+function filterAdsFromM3U8(m3u8Content, playlistUrl) {
+  return filterM3u8Ads(m3u8Content, FilterLevel.STRONG, playlistUrl || null);
 }
 
-// ─── 自定义 HLS.js Loader（参考 LunaTV play/page.tsx）
-// 在 manifest/level 请求成功后，Hook onSuccess 回调，过滤广告分段标记
+// ─── 自定义 HLS.js Loader：manifest/level 成功后过滤广告分片
 class CustomHlsJsLoader extends Hls.DefaultConfig.loader {
   constructor(config) {
     super(config);
@@ -37,7 +34,8 @@ class CustomHlsJsLoader extends Hls.DefaultConfig.loader {
         const onSuccess = callbacks.onSuccess;
         callbacks.onSuccess = function (response, stats, ctx, networkDetails) {
           if (response.data && typeof response.data === 'string') {
-            response.data = filterAdsFromM3U8(response.data);
+            const playlistUrl = (ctx && (ctx.url || ctx.responseUrl)) || context.url || '';
+            response.data = filterAdsFromM3U8(response.data, playlistUrl);
           }
           return onSuccess(response, stats, ctx, networkDetails);
         };

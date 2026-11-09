@@ -327,7 +327,7 @@ function App() {
       });
     }
     
-    // 预初始化设备标识缓存（登录/注册 device：DeskTop-设备型号）
+    // 预初始化设备标识缓存（登录/注册 device：DeskTop-Mac-ARM/Intel、DeskTop-Win、DeskTop-Linux）
     getDevicePlatformAsync().then(device => {
       console.log('设备标识缓存已初始化:', device);
     }).catch(err => {

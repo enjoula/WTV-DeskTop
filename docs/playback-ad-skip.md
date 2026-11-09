@@ -1,5 +1,8 @@
 # 视频播放跳过逻辑说明（去广告 & 片头片尾）跳过广告逻辑分析
 
+> **WTV DeskTop 现行实现**已与 Android 对齐为 STRONG 剔除广告分片，见 **[hls-ad-block.md](./hls-ad-block.md)**。  
+> 下文保留对 LunaTV / 早期「只剥 DISCONTINUITY」方案的分析，供对照；请勿再按旧逻辑改代码。
+
 ## 1. 项目背景
 
 项目地址：

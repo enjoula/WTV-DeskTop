@@ -1,6 +1,7 @@
 // api/client.js
 import axios from 'axios';
 import { getApiBaseURL } from '../config/apiConfig';
+import { decryptResponseData, encryptConfig } from './crypto';
 
 // 创建axios实例
 const baseURL = getApiBaseURL();
@@ -70,12 +71,13 @@ const handleUnauthorized = (message) => {
 
 // 请求拦截器
 apiClient.interceptors.request.use(
-  (config) => {
+  async (config) => {
     // 从localStorage获取token
     const token = localStorage.getItem('token');
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
     }
+    await encryptConfig(config);
     
     // 调试信息：记录请求详情
     console.log('API 请求:', {
@@ -96,7 +98,12 @@ apiClient.interceptors.request.use(
 
 // 响应拦截器
 apiClient.interceptors.response.use(
-  (response) => {
+  async (response) => {
+    try {
+      await decryptResponseData(response);
+    } catch (err) {
+      return Promise.reject({ message: '响应解密失败', originalError: err });
+    }
     const skipUnauthorizedHandling = !!response?.config?.skipUnauthorizedHandling;
     // 业务层返回 code=401 时提示登录（message 取自接口响应）
     if (response?.data?.code === 401) {
@@ -114,7 +121,14 @@ apiClient.interceptors.response.use(
     });
     return response;
   },
-  (error) => {
+  async (error) => {
+    if (error.response) {
+      try {
+        await decryptResponseData(error.response);
+      } catch (err) {
+        return Promise.reject({ message: '响应解密失败', originalError: err });
+      }
+    }
     // 调试信息：记录错误详情
     console.error('API 响应错误:', {
       message: error.message,

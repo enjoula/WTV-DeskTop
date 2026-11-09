@@ -48,51 +48,44 @@ const Profile = () => {
     }
   }, [user]);
 
-  // 修改密码
-  const handleChangePassword = async (newPassword) => {
+  // 修改密码：必须同时提交旧密码，由服务端校验后再更新
+  const handleChangePassword = async ({ oldPassword, newPassword }) => {
     try {
-      const response = await updateProfile({ password: newPassword });
+      const response = await updateProfile({
+        old_password: oldPassword,
+        password: newPassword,
+      });
       const resData = response?.data || {};
-      const code = resData.code;
-
-      if (code === 0) {
+      if (resData.code === 0) {
         showCenterTip('密码修改成功');
         setShowPasswordDialog(false);
-      } else if (code === 401) {
-        showCenterTip('账号在其它设备登录，当前设备已下线');
-        setTimeout(() => {
-          dispatch(logoutUser()).then(() => {
-            navigate('/login');
-          });
-        }, 1000);
-      } else if (code === 400) {
-        showCenterTip('昵称和密码至少需要传入一个！');
-      } else if (code === 500) {
-        showCenterTip('密码修改失败，请稍后重试');
-      } else {
-        const errorMsg = resData.message || '密码修改失败，请稍后重试';
-        showCenterTip(errorMsg);
-    }
-    } catch (err) {
-      console.error('修改密码失败:', err);
-      const resData = err?.response?.data || {};
-      const code = resData.code;
-
-      if (code === 401) {
-        showCenterTip('账号在其它设备登录，当前设备已下线');
-        setTimeout(() => {
-          dispatch(logoutUser()).then(() => {
-            navigate('/login');
-          });
-        }, 1000);
-      } else if (code === 400) {
-        showCenterTip('昵称和密码至少需要传入一个！');
-      } else if (code === 500) {
-        showCenterTip('密码修改失败，请稍后重试');
-      } else {
-        const errorMsg = resData.message || err?.message || '密码修改失败，请稍后重试';
-        showCenterTip(errorMsg);
+        return;
       }
+      if (resData.code === 401) {
+        showCenterTip('账号在其它设备登录，当前设备已下线');
+        setTimeout(() => {
+          dispatch(logoutUser()).then(() => {
+            navigate('/login');
+          });
+        }, 1000);
+        return;
+      }
+      throw new Error(resData.message || '密码修改失败，请稍后重试');
+    } catch (err) {
+      if (err?.response) {
+        const resData = err.response.data || {};
+        if (resData.code === 401) {
+          showCenterTip('账号在其它设备登录，当前设备已下线');
+          setTimeout(() => {
+            dispatch(logoutUser()).then(() => {
+              navigate('/login');
+            });
+          }, 1000);
+          return;
+        }
+        throw new Error(resData.message || err.message || '密码修改失败，请稍后重试');
+      }
+      throw err;
     }
   };
 

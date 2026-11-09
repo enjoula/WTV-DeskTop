@@ -23,7 +23,7 @@ export const register = async (userData) => {
   
   const data = {
     ...userData,
-    device: device || 'DeskTop-windows10' // 最后的默认值（约定：平台-设备型号）
+    device: device || 'DeskTop-Win' // 最后的默认值（API 枚举）
   };
   
   console.log('注册 - 发送的数据:', { ...data, password: '***' });
@@ -52,7 +52,7 @@ export const login = async (credentials) => {
   
   const data = {
     ...credentials,
-    device: device || 'DeskTop-windows10' // 最后的默认值（约定：平台-设备型号）
+    device: device || 'DeskTop-Win' // 最后的默认值（API 枚举）
   };
   
   console.log('登录 - 发送的数据:', { ...data, password: '***' });

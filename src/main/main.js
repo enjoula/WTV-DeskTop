@@ -1,8 +1,6 @@
 const { app, BrowserWindow, ipcMain, session, net } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const os = require('os');
-const { execSync } = require('child_process');
 const https = require('https');
 const http = require('http');
 const { Transform } = require('stream');
@@ -802,97 +800,27 @@ ipcMain.handle('get-version-code', () => {
   }
 });
 
-/** 安全执行 shell 命令，失败返回空串 */
-function safeExec(command) {
-  try {
-    return String(execSync(command, { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] })).trim();
-  } catch (_) {
-    return '';
-  }
-}
-
-/** 从文本中识别 Mac 机型家族：MacBook / MacMini / iMac / MacPro / MacStudio */
-function resolveMacModelFamily(text) {
-  const value = String(text || '');
-  if (/macbook/i.test(value)) return 'MacBook';
-  if (/mac\s*mini|macmini/i.test(value)) return 'MacMini';
-  if (/mac\s*studio|macstudio/i.test(value)) return 'MacStudio';
-  if (/mac\s*pro|macpro/i.test(value)) return 'MacPro';
-  if (/imac/i.test(value)) return 'iMac';
-  return null;
-}
-
 /**
- * 登录/注册 device：约定「平台-设备型号」
- * 例：DeskTop-windows11、DeskTop-MacBook-Arm、DeskTop-MacMini-Arm、DeskTop-Ubuntu7
+ * 登录/注册 device（API 枚举）：
+ * Mac：DeskTop-Mac-ARM / DeskTop-Mac-Intel
+ * Windows：DeskTop-Win
+ * Linux：DeskTop-Linux
  */
 function resolveLoginDevice() {
   const platform = process.platform;
   const arch = process.arch;
-  const archLabel = arch === 'arm64' || arch === 'arm' ? 'Arm' : 'Intel';
 
   if (platform === 'darwin') {
-    const hostname = (os.hostname() || '').replace(/\.local$/i, '');
-    let family =
-      resolveMacModelFamily(hostname) ||
-      resolveMacModelFamily(safeExec('sysctl -n hw.model'));
-
-    if (!family) {
-      const profiler = safeExec('system_profiler SPHardwareDataType');
-      const nameMatch = profiler.match(/Model Name:\s*(.+)/i);
-      const idMatch = profiler.match(/Model Identifier:\s*(.+)/i);
-      family =
-        resolveMacModelFamily(nameMatch?.[1]) ||
-        resolveMacModelFamily(idMatch?.[1]) ||
-        'Mac';
-    }
-
-    return `DeskTop-${family}-${archLabel}`;
+    return arch === 'arm64' || arch === 'arm'
+      ? 'DeskTop-Mac-ARM'
+      : 'DeskTop-Mac-Intel';
   }
 
   if (platform === 'win32') {
-    // os.release() 形如 10.0.22631；build >= 22000 为 Windows 11
-    const release = os.release() || '';
-    const parts = release.split('.').map((n) => Number(n) || 0);
-    const major = parts[0] || 0;
-    const minor = parts[1] || 0;
-    const build = parts[2] || 0;
-    let windowsName = 'windows10';
-    if (major === 10 && build >= 22000) {
-      windowsName = 'windows11';
-    } else if (major === 10) {
-      windowsName = 'windows10';
-    } else if (major === 6 && minor === 3) {
-      windowsName = 'windows8';
-    } else if (major === 6 && minor === 2) {
-      windowsName = 'windows8';
-    } else if (major === 6 && minor === 1) {
-      windowsName = 'windows7';
-    } else if (major > 0) {
-      windowsName = `windows${major}`;
-    }
-    return `DeskTop-${windowsName}`;
+    return 'DeskTop-Win';
   }
 
-  // Linux：读 /etc/os-release，例 Ubuntu 22.04 -> DeskTop-Ubuntu22
-  let distro = 'Linux';
-  let versionMajor = '';
-  try {
-    const osRelease = fs.readFileSync('/etc/os-release', 'utf8');
-    const idMatch = osRelease.match(/^ID=(.+)$/m);
-    const verMatch = osRelease.match(/^VERSION_ID=(.+)$/m);
-    if (idMatch) {
-      distro = idMatch[1].replace(/["']/g, '').trim();
-      distro = distro.charAt(0).toUpperCase() + distro.slice(1);
-    }
-    if (verMatch) {
-      const ver = verMatch[1].replace(/["']/g, '').trim();
-      versionMajor = String(ver.split('.')[0] || '');
-    }
-  } catch (_) {
-    /* ignore */
-  }
-  return `DeskTop-${distro}${versionMajor}`;
+  return 'DeskTop-Linux';
 }
 
 // 获取平台信息（用于更新检查，格式保持 DeskTop-Mac-ARM / DeskTop-Win）
