@@ -1,9 +1,31 @@
-// POST / PUT / PATCH 的请求体会加密并签名。GET 保持明文。
+// 写接口 + 所有鉴权接口加密并签名；公开 GET（片库列表等）保持明文。
 // 协议见 Service/video_service/docs/ENCRYPTION.md
 
 const ENCRYPT_VERSION = '1';
 const ENCRYPT_KID = 'v1';
 const ENCRYPT_SALT = '91b470b57d8d4b75a3a7ac4d58c2b891b8e134a0ebc12ae4';
+
+// 服务端 JWTAuth / Admin 鉴权路径（不含公开 OptionalJWT 列表接口）
+const AUTH_ENCRYPT_PATHS = [
+  '/video/search',
+  '/video/episodes',
+  '/video/play',
+  '/user/me',
+  '/user/profile',
+  '/user/avatar',
+  '/user/logout',
+  '/user/favorites',
+  '/user/watch-history',
+  '/user/watch-progress',
+  '/membership/me',
+  '/membership/status',
+  '/membership/order',
+  '/membership/orders',
+  '/billing/order',
+  '/billing/purchases/videos',
+  '/billing/purchases/episodes',
+  '/admin/cache/flush',
+];
 
 const RSA_PUBLIC_KEY_PEM = `-----BEGIN PUBLIC KEY-----
 MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA1vFOzZzXApmgJyLthDdj
@@ -174,10 +196,32 @@ function isBinaryBody(data) {
   return false;
 }
 
+function requestPath(config) {
+  const raw = `${config.baseURL || ''}${config.url || ''}`;
+  let path = raw;
+  try {
+    path = raw.startsWith('http') ? new URL(raw).pathname : String(raw).split('?')[0];
+  } catch (err) {
+    path = String(config.url || '').split('?')[0];
+  }
+  path = path.replace(/\/+$/, '') || '/';
+  if (path.startsWith('/api/')) path = path.slice(4);
+  else if (path === '/api') path = '/';
+  if (!path.startsWith('/')) path = `/${path}`;
+  return path;
+}
+
+function isAuthEncryptPath(path) {
+  return AUTH_ENCRYPT_PATHS.some((item) => path === item || path.startsWith(`${item}/`));
+}
+
 export function shouldEncrypt(config) {
   if (!config || config.skipCrypto) return false;
   const method = String(config.method || 'get').toLowerCase();
-  return method === 'post' || method === 'put' || method === 'patch';
+  if (method === 'post' || method === 'put' || method === 'patch' || method === 'delete') {
+    return true;
+  }
+  return isAuthEncryptPath(requestPath(config));
 }
 
 function setHeader(config, name, value) {
@@ -206,6 +250,8 @@ export async function encryptConfig(config) {
   const sealed = await seal(payload);
   config.data = sealed.body;
   config.cryptoAesKey = sealed.aesKey;
+  // 鉴权 GET/DELETE 也带加密 Body（通常为 {}），用于协商 AES Key 并加密响应
+  setHeader(config, 'Content-Type', 'application/json');
   Object.entries(sealed.headers).forEach(([name, value]) => setHeader(config, name, value));
   return config;
 }
