@@ -1,4 +1,4 @@
-// 写接口 + 所有鉴权接口加密并签名；公开 GET（片库列表等）保持明文。
+// 写接口 + 登录/注册 + 片库列表 + 鉴权接口加密并签名。
 // http://局域网 IP 等非安全上下文没有 crypto.subtle，自动降级到 node-forge。
 // 协议见 Service/video_service/docs/ENCRYPTION.md
 
@@ -8,8 +8,15 @@ const ENCRYPT_VERSION = '1';
 const ENCRYPT_KID = 'v1';
 const ENCRYPT_SALT = '91b470b57d8d4b75a3a7ac4d58c2b891b8e134a0ebc12ae4';
 
-// 服务端 JWTAuth / Admin 鉴权路径（不含公开 OptionalJWT 列表接口）
+// 与服务端 AuthEncryptPaths 对齐（写方法另有统一加密）
 const AUTH_ENCRYPT_PATHS = [
+  '/user/login',
+  '/user/register',
+  '/video/movies',
+  '/video/tv',
+  '/video/anime',
+  '/video/tvshow',
+  '/video/documentary',
   '/video/search',
   '/video/episodes',
   '/video/play',
