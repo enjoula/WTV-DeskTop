@@ -1883,6 +1883,7 @@ button:disabled {
   display: flex;
   align-items: center;
   gap: 12px;
+  min-width: 0; /* 允许子项在窄宽度下溢出滚动 */
 }
 
 .filter-row-label {
@@ -1891,19 +1892,30 @@ button:disabled {
 }
 
 .filter-row-tags {
-  /* 使用弹性布局：能一行展示时保持一行，放不下时自动换行为两行左右尽量平均 */
+  /* 单行展示，放不下时左右滚动，不换行 */
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 8px;
   flex: 1;
-  align-items: flex-start;
-  /* 当换行时，让第二行开始位置避开“全部”按钮的左侧对齐 */
-  padding-left: 64px;
+  min-width: 0;
+  align-items: center;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
 }
 
-.filter-row-tags .filter-tag:first-child {
-  /* 抵消容器的左侧内边距，使首行“全部”仍左贴齐 */
-  margin-left: -64px;
+.filter-row-tags::-webkit-scrollbar {
+  height: 4px;
+}
+
+.filter-row-tags::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 2px;
+}
+
+.filter-row-tags::-webkit-scrollbar-track {
+  background: transparent;
 }
 .filter-tag {
   padding: 6px 16px;

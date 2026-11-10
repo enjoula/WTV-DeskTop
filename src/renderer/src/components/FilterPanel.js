@@ -103,6 +103,15 @@ const FilterPanel = ({ type, onFilterChange, onApplyFilters }) => {
     handleFilterChange(filterType, newValue);
   };
 
+  // 纵向滚轮转为横向滚动，便于鼠标操作筛选项
+  const handleTagsWheel = (e) => {
+    const el = e.currentTarget;
+    if (el.scrollWidth <= el.clientWidth) return;
+    if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
+    e.preventDefault();
+    el.scrollLeft += e.deltaY;
+  };
+
   return (
     <div className="filter-panel">
       <div className="filter-rows">
@@ -155,7 +164,7 @@ const FilterPanel = ({ type, onFilterChange, onApplyFilters }) => {
     return (
             <div key={filterType} className="filter-row">
               <div className="filter-row-label">{label}：</div>
-              <div className="filter-row-tags">
+              <div className="filter-row-tags" onWheel={handleTagsWheel}>
                 {/* 全部选项 */}
           <button
                   className={`filter-tag ${selectedValue === '' ? 'active' : ''}`}
