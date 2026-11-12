@@ -2,19 +2,50 @@ import React, { useEffect, useRef, useState, useImperativeHandle, forwardRef } f
 import Artplayer from 'artplayer';
 import Hls from 'hls.js';
 import { destroyHlsInstance, silenceAllPageMedia, stopMediaElement } from '../utils/mediaCleanup';
-import { HLS_LOCK_HIGHEST_CONFIG, lockHlsHighestLevel } from '../utils/hlsQuality';
+import { lockHlsHighestLevel } from '../utils/hlsQuality';
 import { FilterLevel, filterM3u8Ads } from '../utils/m3u8AdFilter';
 
 /** 全局只允许一路 HLS/ArtPlayer，防止切片后旧实例继续出声 */
 let liveArtPlayer = null;
 let liveHlsPlayer = null;
 
+/** 强制销毁全局单例（播放窗换片 / 主进程 stopWindowMedia 时调用） */
+export function forceDisposeLivePlayers() {
+  try {
+    if (liveHlsPlayer) {
+      destroyHlsInstance(liveHlsPlayer);
+      liveHlsPlayer = null;
+    }
+  } catch (_) { /* ignore */ }
+  try {
+    if (liveArtPlayer) {
+      const video = liveArtPlayer.video;
+      if (video?._wtvStallRecovery?.teardown) {
+        try { video._wtvStallRecovery.teardown(); } catch (_) { /* ignore */ }
+        try { delete video._wtvStallRecovery; } catch (_) { /* ignore */ }
+      }
+      if (video?.hls) {
+        destroyHlsInstance(video.hls);
+        try { video.hls = null; } catch (_) { /* ignore */ }
+      }
+      if (video) stopMediaElement(video);
+      try { liveArtPlayer.pause(); } catch (_) { /* ignore */ }
+      try { liveArtPlayer.destroy(); } catch (_) { /* ignore */ }
+      liveArtPlayer = null;
+    }
+  } catch (_) { /* ignore */ }
+  silenceAllPageMedia();
+}
+
 if (typeof window !== 'undefined') {
   window.Hls = Hls;
+  window.__wtvForceDisposePlayer = forceDisposeLivePlayers;
 }
 
 if (typeof Artplayer !== 'undefined') {
   Artplayer.PLAYBACK_RATE = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
+  // 播放中无操作 3 秒后自动向下收起控制栏（ArtPlayer 默认值，显式锁定）
+  Artplayer.CONTROL_HIDE_TIME = 3000;
 }
 
 // ─── 去广告：对齐 Android M3u8Filter STRONG
@@ -417,6 +448,11 @@ const MyArtPlayer = forwardRef(({
       if (now - lastPlaybackEndedAtRef.current < 800) return;
       lastPlaybackEndedAtRef.current = now;
       isPlayingRef.current = false;
+      // 播完立刻停拉流，避免旧片继续占带宽/MSE，拖慢下一部起播
+      try {
+        const endedHls = hlsInstanceRef.current || liveHlsPlayer;
+        if (endedHls) endedHls.stopLoad();
+      } catch (_) { /* ignore */ }
       try {
         console.log('WTV_PLAY_LOG', 'player.ended', { source });
         if (typeof window !== 'undefined' && window.electronAPI?.wtvRendererLog) {
@@ -499,11 +535,11 @@ const MyArtPlayer = forwardRef(({
                 // Electron 下 Worker 偶发静默停住后不再拉分片，主线程更稳
                 enableWorker: false,
                 lowLatencyMode: false,
-                backBufferLength: 30,
-                // 600s 缓冲过大，容易占满 MSE / 状态机异常后长期不再请求分片
-                maxBufferLength: 120,
-                maxMaxBufferLength: 180,
-                maxBufferSize: 120 * 1000 * 1000,
+                // 控制缓冲体积：过大 MSE 在换片 destroy 时会卡很久，拖慢下一部起播
+                backBufferLength: 12,
+                maxBufferLength: 45,
+                maxMaxBufferLength: 90,
+                maxBufferSize: 45 * 1000 * 1000,
                 maxBufferHole: 1.5,
                 highBufferWatchdogPeriod: 2,
                 nudgeOffset: 0.1,
@@ -513,29 +549,53 @@ const MyArtPlayer = forwardRef(({
                 manifestLoadingTimeOut: 15000,
                 levelLoadingTimeOut: 15000,
                 maxStarvationDelay: 4,
-                // 拉流锁定最高清，不再按带宽自动降档
-                ...HLS_LOCK_HIGHEST_CONFIG,
+                // 起播允许 ABR 估带宽；首片后再锁最高清（见 bindHlsEvents）
+                capLevelToPlayerSize: false,
+                capLevelOnFPSDrop: false,
+                testBandwidth: true,
+                startLevel: -1,
               };
             };
 
             const bindHlsEvents = (instance) => {
+              let qualityLocked = false;
+              const lockHighestOnceReady = () => {
+                if (qualityLocked) return;
+                qualityLocked = true;
+                lockHlsHighestLevel(instance);
+              };
+
               instance.on(HlsClass.Events.FRAG_LOADING, () => {
                 lastFragAt = Date.now();
               });
               instance.on(HlsClass.Events.FRAG_LOADED, () => {
                 lastFragAt = Date.now();
                 resetFatalCounters();
+                // 首个分片落地后再锁最高清，避免换片后大分片首包过慢
+                lockHighestOnceReady();
               });
               instance.on(HlsClass.Events.LEVEL_LOADED, () => {
                 lastFragAt = Date.now();
               });
               instance.on(HlsClass.Events.MANIFEST_PARSED, () => {
-                lockHlsHighestLevel(instance);
+                // 多档时先用偏高但不一定是最高的档起播，加快首帧
+                try {
+                  const levels = instance.levels || [];
+                  if (levels.length > 2) {
+                    const startIdx = Math.max(0, levels.length - 2);
+                    instance.startLevel = startIdx;
+                    instance.nextLevel = startIdx;
+                    instance.loadLevel = startIdx;
+                  } else if (levels.length > 0) {
+                    lockHlsHighestLevel(instance);
+                    qualityLocked = true;
+                  }
+                } catch (_) { /* ignore */ }
                 resetFatalCounters();
                 if (onLoadedMetadataRef.current) onLoadedMetadataRef.current();
               });
               instance.on(HlsClass.Events.LEVELS_UPDATED, () => {
-                lockHlsHighestLevel(instance);
+                if (qualityLocked) lockHlsHighestLevel(instance);
               });
 
               instance.on(HlsClass.Events.ERROR, (_event, data) => {
@@ -809,8 +869,20 @@ const MyArtPlayer = forwardRef(({
     });
 
     if (liveArtPlayer && liveArtPlayer !== art) {
+      try {
+        const oldVideo = liveArtPlayer.video;
+        if (oldVideo?._wtvStallRecovery?.teardown) {
+          try { oldVideo._wtvStallRecovery.teardown(); } catch (_) { /* ignore */ }
+        }
+        destroyHlsInstance(oldVideo?.hls || liveHlsPlayer);
+        if (oldVideo) {
+          try { oldVideo.hls = null; } catch (_) { /* ignore */ }
+          stopMediaElement(oldVideo);
+        }
+      } catch (_) { /* ignore */ }
       try { liveArtPlayer.pause(); } catch (_) { /* ignore */ }
       try { liveArtPlayer.destroy(); } catch (_) { /* ignore */ }
+      liveHlsPlayer = null;
     }
     liveArtPlayer = art;
 
@@ -1265,16 +1337,38 @@ const MyArtPlayer = forwardRef(({
         console.error('添加 CSS 全屏按钮失败:', e);
       }
 
-      // 未开播 / 暂停时保持控制栏可见，确保全屏按钮始终能点到
-      const ensureControlsVisible = () => {
+      // 用自有 class 标记真实播放态：CSS 仅在未播放时强制露出控制栏。
+      // ArtPlayer 没有 art-playing，旧选择器会一直命中，导致控制栏无法下滑隐藏。
+      const syncPlayingClass = (isPlaying) => {
         try {
-          art.controls.show = true;
+          art.template?.$player?.classList.toggle('wtv-is-playing', !!isPlaying);
         } catch (_) { /* ignore */ }
       };
-      ensureControlsVisible();
-      art.on('video:pause', ensureControlsVisible);
-      art.on('video:canplay', ensureControlsVisible);
-      art.on('ready', ensureControlsVisible);
+
+      // 未开播 / 暂停时保持控制栏可见，确保全屏按钮始终能点到；
+      // 播放中交给 ArtPlayer：无操作 CONTROL_HIDE_TIME 后向下收起。
+      const ensureControlsVisibleWhenIdle = () => {
+        try {
+          if (!art.playing) {
+            art.controls.show = true;
+          }
+        } catch (_) { /* ignore */ }
+      };
+
+      syncPlayingClass(!!art.playing);
+      ensureControlsVisibleWhenIdle();
+      art.on('video:playing', () => {
+        syncPlayingClass(true);
+      });
+      art.on('video:pause', () => {
+        syncPlayingClass(false);
+        ensureControlsVisibleWhenIdle();
+      });
+      art.on('video:ended', () => {
+        syncPlayingClass(false);
+        ensureControlsVisibleWhenIdle();
+      });
+      art.on('ready', ensureControlsVisibleWhenIdle);
 
       if (onReadyRef.current) onReadyRef.current();
     };
@@ -1305,6 +1399,9 @@ const MyArtPlayer = forwardRef(({
   // 同步播放状态
   useEffect(() => {
     if (!artInstanceRef.current) return;
+    try {
+      artInstanceRef.current.template?.$player?.classList.toggle('wtv-is-playing', !!playing);
+    } catch (_) { /* ignore */ }
     if (playing && artInstanceRef.current.paused) {
       artInstanceRef.current.play().catch(err => console.warn('播放失败:', err));
     } else if (!playing && !artInstanceRef.current.paused) {

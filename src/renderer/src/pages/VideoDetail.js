@@ -22,7 +22,6 @@ import { toggleFavorite } from '../api/user';
 import { logoutUser } from '../store/authSlice';
 import { showCenterTip } from '../utils/tips';
 import { silenceAllPageMedia, stopMediaElement } from '../utils/mediaCleanup';
-import { HLS_LOCK_HIGHEST_CONFIG, lockHlsHighestLevel } from '../utils/hlsQuality';
 import { getVideoPlayHistory, updatePlayProgress } from '../utils/playHistory';
 import { getPlayerSettings, updatePlayerSetting } from '../utils/playerSettings';
 import { PlaybackController } from '../utils/playbackController';
@@ -660,7 +659,15 @@ const VideoDetail = () => {
   // 当视频ID变化时，重置播放状态与视频信息，避免播放窗复用时残留上一支片子
   useEffect(() => {
     // 立刻掐掉上一支的画面+声音（React 卸载可能晚于新片起播）
-    silenceAllPageMedia();
+    try {
+      if (typeof window !== 'undefined' && typeof window.__wtvForceDisposePlayer === 'function') {
+        window.__wtvForceDisposePlayer();
+      } else {
+        silenceAllPageMedia();
+      }
+    } catch (_) {
+      silenceAllPageMedia();
+    }
     try {
       const currentVideo = playerRefInternal.current?.getVideoElement?.();
       if (currentVideo) stopMediaElement(currentVideo);
@@ -1085,80 +1092,9 @@ const VideoDetail = () => {
               hlsSupported: Hls.isSupported()
             });
             
-            // 如果是 HLS 视频但没有 HLS 实例，尝试手动创建
-            if (isM3u8 && !hlsInstance && Hls.isSupported()) {
-              console.log('检测到 HLS 视频但缺少 HLS 实例，尝试手动创建...');
-              try {
-                // 启用原生控件
-                if (videoElement) {
-                  if (!videoElement.hasAttribute('controls')) {
-                    videoElement.setAttribute('controls', '');
-                  }
-                  videoElement.controls = true;
-                }
-                
-                const hls = new Hls({
-                  enableWorker: true,
-                  lowLatencyMode: false, // 禁用低延迟模式，避免缓冲不足导致音频卡顿
-                  backBufferLength: 90,
-                  maxBufferLength: 600, // 增加最大缓冲长度到600秒，确保音频流畅
-                  maxMaxBufferLength: 600, // 增加最大缓冲长度上限到600秒
-                  ...HLS_LOCK_HIGHEST_CONFIG,
-                  maxBufferSize: 600 * 1000 * 1000, // 最大缓冲大小 600MB（对应600秒视频）
-                  maxBufferHole: 0.5, // 允许的最大缓冲间隙（秒）
-                  highBufferWatchdogPeriod: 2, // 高缓冲监控周期（秒）
-                  nudgeOffset: 0.1, // 缓冲调整偏移量（秒）
-                  nudgeMaxRetry: 3, // 最大重试次数
-                  maxFragLoadingTimeOut: 20000, // 片段加载超时时间（毫秒）
-                  fragLoadingTimeOut: 20000, // 片段加载超时时间（毫秒）
-                  manifestLoadingTimeOut: 10000, // 清单加载超时时间（毫秒）
-                  debug: false
-                });
-                
-                hls.loadSource(playUrl.url);
-                hls.attachMedia(videoElement);
-                
-                hls.on(Hls.Events.MANIFEST_PARSED, () => {
-                  lockHlsHighestLevel(hls);
-                  console.log('HLS manifest 解析完成，可以播放');
-                  if (videoElement.paused && !isSeekingRef.current && document.contains(videoElement) && !userPausedRef.current && (isPlaying || isPlayingRef.current)) {
-                    videoElement.play().catch(err => {
-                      if (err.name === 'AbortError' && err.message?.includes('removed from the document')) {
-                        console.warn('播放请求被中断（媒体元素可能被移除）:', err.message);
-                      } else {
-                        console.error('HLS 播放失败:', err);
-                      }
-                    });
-                  }
-                });
-                
-                hls.on(Hls.Events.ERROR, (event, data) => {
-                  // 只处理致命错误，忽略非致命错误（如 bufferSeekOverHole、bufferStalledError）
-                  if (data.fatal) {
-                    console.error('HLS 致命错误:', data);
-                    switch (data.type) {
-                      case Hls.ErrorTypes.NETWORK_ERROR:
-                        console.error('HLS 网络错误，尝试恢复...');
-                        hls.startLoad();
-                        break;
-                      case Hls.ErrorTypes.MEDIA_ERROR:
-                        console.error('HLS 媒体错误，尝试恢复...');
-                        hls.recoverMediaError();
-                        break;
-                      default:
-                        console.error('HLS 致命错误，无法恢复');
-                        hls.destroy();
-                        break;
-                    }
-                  }
-                });
-                
-                // 将 HLS 实例保存到 video 元素
-                videoElement.hls = hls;
-                console.log('HLS 实例创建成功');
-              } catch (error) {
-                console.error('创建 HLS 实例失败:', error);
-              }
+            // HLS 由 MyArtPlayer 独占创建；这里不再新建第二路 600MB 缓冲实例，避免换片后内存/主线程被拖垮
+            if (isM3u8 && !hlsInstance) {
+              console.warn('检测到 HLS 视频暂无实例，等待 MyArtPlayer 接管（不再在此兜底 new Hls）');
             }
             
             // 如果是 HLS 视频但 readyState 为 0，仅监听加载事件，避免重复实例
@@ -2209,9 +2145,24 @@ const VideoDetail = () => {
         }, 500);
       } else {
         wtvPlayLog('autonext.lastEpisode', { videoId: id, episode: selectedEpisode });
+        // 最后一集播完：停拉流，避免旧缓冲占着影响下一部
+        try {
+          const endedVideo = playerRefInternal.current?.getVideoElement?.();
+          if (endedVideo?.hls) endedVideo.hls.stopLoad();
+        } catch (_) { /* ignore */ }
       }
     } else if (!autoNextEpisode && isEpisodeType) {
       wtvPlayLog('autonext.disabled', { videoId: id, episode: selectedEpisode });
+      try {
+        const endedVideo = playerRefInternal.current?.getVideoElement?.();
+        if (endedVideo?.hls) endedVideo.hls.stopLoad();
+      } catch (_) { /* ignore */ }
+    } else {
+      // 电影等无连播场景：播完停流
+      try {
+        const endedVideo = playerRefInternal.current?.getVideoElement?.();
+        if (endedVideo?.hls) endedVideo.hls.stopLoad();
+      } catch (_) { /* ignore */ }
     }
   };
 
@@ -4104,7 +4055,7 @@ const VideoDetail = () => {
         }}>
           <MyArtPlayer
             ref={playerRefInternal}
-            key={`player-${id}-${selectedEpisode || 'movie'}-${playUrl.url}`}
+            key={`player-${id}-${selectedEpisode || 'movie'}`}
             url={playUrl.url}
             videoId={id}
             playing={controller.canPlay()}
@@ -5090,103 +5041,9 @@ const VideoDetail = () => {
                 setVideoLoadError('视频加载超时，请检查网络连接或重试');
               }, timeoutDuration);
               
-              // 对于 HLS 视频，尝试手动创建 HLS 实例（如果还没有）
+              // HLS 由 MyArtPlayer 独占；此处不再延迟 new 第二路超大缓冲实例
               if (isHLS) {
-                setTimeout(() => {
-                  try {
-                    const videoElement = (() => {
-                try {
-                  return getVideoElement();
-                } catch (e) {
-                  return null;
-                }
-              })() || 
-                                       (playerRef.current?.wrapper?.querySelector?.('video'));
-                    if (videoElement && !videoElement.hls && Hls.isSupported()) {
-                      console.log('onStart: 检测到 HLS 视频但缺少实例，尝试创建...');
-                      const hls = new Hls({
-                        enableWorker: true,
-                        lowLatencyMode: false, // 禁用低延迟模式，避免缓冲不足导致音频卡顿
-                        backBufferLength: 90,
-                        maxBufferLength: 600, // 增加最大缓冲长度到600秒，确保音频流畅
-                        maxMaxBufferLength: 600, // 增加最大缓冲长度上限到600秒
-                        ...HLS_LOCK_HIGHEST_CONFIG,
-                        maxBufferSize: 600 * 1000 * 1000, // 最大缓冲大小 600MB（对应600秒视频）
-                        maxBufferHole: 0.5, // 允许的最大缓冲间隙（秒）
-                        highBufferWatchdogPeriod: 2, // 高缓冲监控周期（秒）
-                        nudgeOffset: 0.1, // 缓冲调整偏移量（秒）
-                        nudgeMaxRetry: 3, // 最大重试次数
-                        maxFragLoadingTimeOut: 20000, // 片段加载超时时间（毫秒）
-                        fragLoadingTimeOut: 20000, // 片段加载超时时间（毫秒）
-                        manifestLoadingTimeOut: 10000, // 清单加载超时时间（毫秒）
-                        debug: false
-                      });
-                      
-                      hls.loadSource(playUrl.url);
-                      hls.attachMedia(videoElement);
-                      
-                      hls.on(Hls.Events.MANIFEST_PARSED, () => {
-                        lockHlsHighestLevel(hls);
-                        console.log('onStart: HLS manifest 解析完成');
-                        // 等待视频元素准备好再设置播放状态
-                        // 需要等待 readyState >= 1 且至少等待 canplay 事件
-                        const waitForReady = () => {
-                          if (document.contains(videoElement) && videoElement.readyState >= 1) {
-                            console.log('onStart: HLS 视频已准备好，设置播放状态');
-                            setIsPlaying(true);
-                            // 尝试播放
-                            if (videoElement.paused && !isSeekingRef.current) {
-                              videoElement.play().catch(err => {
-                                if (err.name !== 'AbortError' || !err.message?.includes('removed from the document')) {
-                                  console.warn('onStart: HLS 播放失败:', err);
-                                }
-                              });
-                            }
-                          } else {
-                            // 等待 canplay 事件
-                            const onCanPlay = () => {
-                              if (document.contains(videoElement)) {
-                                console.log('onStart: HLS 视频可以播放，设置播放状态');
-                                setIsPlaying(true);
-                                if (videoElement.paused && !isSeekingRef.current) {
-                                  videoElement.play().catch(err => {
-                                    if (err.name !== 'AbortError' || !err.message?.includes('removed from the document')) {
-                                      console.warn('onStart: HLS 播放失败:', err);
-                                    }
-                                  });
-                                }
-                              }
-                              videoElement.removeEventListener('canplay', onCanPlay);
-                            };
-                            videoElement.addEventListener('canplay', onCanPlay, { once: true });
-                          }
-                        };
-                        setTimeout(waitForReady, 500); // 增加延迟，确保视频元素已初始化
-                      });
-                      
-                      hls.on(Hls.Events.ERROR, (event, data) => {
-                        console.error('onStart: HLS 错误:', data);
-                        if (data.fatal) {
-                          switch (data.type) {
-                            case Hls.ErrorTypes.NETWORK_ERROR:
-                              hls.startLoad();
-                              break;
-                            case Hls.ErrorTypes.MEDIA_ERROR:
-                              hls.recoverMediaError();
-                              break;
-                            default:
-                              hls.destroy();
-                              break;
-                          }
-                        }
-                      });
-                      
-                      videoElement.hls = hls;
-                    }
-                  } catch (error) {
-                    console.error('onStart: 创建 HLS 实例失败:', error);
-                  }
-                }, 500);
+                console.log('onStart: HLS 交由 MyArtPlayer 管理，跳过备用 Hls 创建');
               }
 
               // 额外读取一次视频时长，避免部分源在初始化阶段 duration 未同步到 state

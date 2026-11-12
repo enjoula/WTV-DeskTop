@@ -33,34 +33,14 @@ export class PlaybackController {
   canPlay() {
     // 如果 state 不存在，返回 false
     if (!this.state) {
-      console.warn(`${this.LOG_PREFIX.WARNING} canPlay: state 不存在，返回 false`);
       return false;
     }
-    
-    const result = !this.state.userPaused && 
-                   !this.state.isSeeking && 
-                   this.state.isPlaying &&
-                   this.state.playerReady;
-    
-    // 详细日志，特别标记用户暂停状态
-    if (this.state.userPaused) {
-      console.log(`${this.LOG_PREFIX.PAUSE} ❌ canPlay = false (用户已暂停)`, {
-        userPaused: this.state.userPaused,
-        isSeeking: this.state.isSeeking,
-        isPlaying: this.state.isPlaying,
-        playerReady: this.state.playerReady
-      });
-    } else {
-      console.log(`${this.LOG_PREFIX.INFO} canPlay 检查:`, {
-        userPaused: this.state.userPaused,
-        isSeeking: this.state.isSeeking,
-        isPlaying: this.state.isPlaying,
-        playerReady: this.state.playerReady,
-        result
-      });
-    }
-    
-    return result;
+
+    // 在 render 热路径调用，避免每次打日志拖慢换片起播
+    return !this.state.userPaused &&
+           !this.state.isSeeking &&
+           this.state.isPlaying &&
+           this.state.playerReady;
   }
 
   /**

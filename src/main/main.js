@@ -4,6 +4,7 @@ const fs = require('fs');
 const https = require('https');
 const http = require('http');
 const { Transform } = require('stream');
+const { spawn } = require('child_process');
 
 console.log('📦 [主进程] main.js 正在加载...');
 
@@ -21,6 +22,72 @@ let currentPlayerVideoData = null;
 let currentVideoWindowTitle = '视频详情';
 
 let pngsucaiCookie = '';
+/** 点击「立即安装」后：先退出本进程，再延迟打开安装包；期间禁止 macOS activate 重建窗口 */
+let isInstallingUpdate = false;
+
+function closeAllBrowserWindows() {
+  BrowserWindow.getAllWindows().forEach((win) => {
+    if (win.isDestroyed()) return;
+    try {
+      win.removeAllListeners('close');
+    } catch (_) { /* ignore */ }
+    try {
+      win.destroy();
+    } catch (_) { /* ignore */ }
+  });
+}
+
+/**
+ * 在独立子进程里延迟启动安装包，避免本应用仍占用文件导致覆盖安装失败。
+ * Windows / macOS 命令与延时方式不同。
+ */
+function launchInstallerAfterAppExit(filePath) {
+  const platform = process.platform;
+
+  if (platform === 'win32') {
+    // ping -n 3 ≈ 等约 2 秒，等本进程退出后再 start 安装包（支持 %APPDATA%\WTV\updates 下的路径）
+    const safePath = path.resolve(String(filePath)).replace(/"/g, '');
+    const child = spawn(
+      process.env.ComSpec || 'cmd.exe',
+      ['/d', '/s', '/c', `ping 127.0.0.1 -n 3 >nul & start "" "${safePath}"`],
+      {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+        windowsVerbatimArguments: false,
+      }
+    );
+    child.unref();
+    return;
+  }
+
+  if (platform === 'darwin') {
+    // sleep 后再 open：.dmg / .pkg / .zip 都会交给系统处理
+    const escaped = String(filePath).replace(/'/g, `'\\''`);
+    const child = spawn(
+      '/bin/sh',
+      ['-c', `sleep 1.5 && open '${escaped}'`],
+      {
+        detached: true,
+        stdio: 'ignore',
+      }
+    );
+    child.unref();
+    return;
+  }
+
+  // Linux 等：尽量用 xdg-open
+  const escaped = String(filePath).replace(/'/g, `'\\''`);
+  const child = spawn(
+    '/bin/sh',
+    ['-c', `sleep 1.5 && xdg-open '${escaped}'`],
+    {
+      detached: true,
+      stdio: 'ignore',
+    }
+  );
+  child.unref();
+}
 
 function isDevEnv() {
   return !app.isPackaged && process.env.NODE_ENV !== 'production';
@@ -675,37 +742,26 @@ app.whenReady().then(() => {
 // for applications and their menu bar to stay active until the user quits
 // explicitly with Cmd + Q.
 app.on('window-all-closed', () => {
+  if (isInstallingUpdate) {
+    app.exit(0);
+    return;
+  }
   if (process.platform !== 'darwin') {
     app.quit();
   }
 });
 
-// Windows 平台：处理应用退出，确保可以正常关闭以便更新安装
-app.on('before-quit', (event) => {
-  // 在 Windows 平台，允许应用正常退出
-  // 不阻止退出，确保覆盖安装时可以关闭应用
-  if (process.platform === 'win32') {
-    // 确保所有窗口都关闭
-    const windows = BrowserWindow.getAllWindows();
-    windows.forEach(window => {
-      if (!window.isDestroyed()) {
-        window.destroy();
-      }
-    });
-  }
-});
-
-// Windows 平台：处理应用退出事件
-app.on('will-quit', (event) => {
-  // 在 Windows 平台，允许应用正常退出
-  // 不阻止退出，确保覆盖安装时可以关闭应用
-  if (process.platform === 'win32') {
-    // 不阻止退出
-    return;
+// 退出前关掉所有窗口，保证覆盖安装时文件不再被占用
+app.on('before-quit', () => {
+  if (isInstallingUpdate || process.platform === 'win32') {
+    closeAllBrowserWindows();
   }
 });
 
 app.on('activate', () => {
+  // 安装更新退出过程中不要因 dock 点击重建窗口
+  if (isInstallingUpdate) return;
+
   // On OS X it's common to re-create a window in the app when the
   // dock icon is clicked and there are no other windows open.
   // 启动阶段 activate 可能先于 ready，必须等 app 就绪再碰 session。
@@ -714,6 +770,7 @@ app.on('activate', () => {
       createWindow();
     } else {
       app.whenReady().then(() => {
+        if (isInstallingUpdate) return;
         if (BrowserWindow.getAllWindows().length === 0) {
           createWindow();
         }
@@ -1090,6 +1147,11 @@ ipcMain.handle('open-video-window', (event, videoId, videoData) => {
 const STOP_PAGE_MEDIA_JS = `
 (() => {
   try {
+    if (typeof window.__wtvForceDisposePlayer === 'function') {
+      window.__wtvForceDisposePlayer();
+    }
+  } catch (e) {}
+  try {
     if (document.pictureInPictureElement) {
       document.exitPictureInPicture();
     }
@@ -1319,14 +1381,81 @@ const safeUnlinkSync = (filePath) => {
   }
 };
 
+/**
+ * 更新包下载目录：Mac / Windows 统一放在应用 userData 下的 updates/，
+ * 不走系统「下载」文件夹，也不写入安装目录（Program Files / .app 通常只读）。
+ * - macOS：~/Library/Application Support/WTV/updates
+ * - Windows：%APPDATA%\\WTV\\updates
+ */
+function getUpdateDownloadDir() {
+  const dir = path.join(app.getPath('userData'), 'updates');
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+/** Windows 路径大小写不敏感；统一判断文件是否在 updates 目录内 */
+function isPathInsideUpdateDir(filePath) {
+  const updateDir = path.resolve(getUpdateDownloadDir()).replace(/[/\\]+$/, '');
+  const resolvedPath = path.resolve(filePath);
+  if (process.platform === 'win32') {
+    const dir = updateDir.toLowerCase();
+    const file = resolvedPath.toLowerCase();
+    return file === dir || file.startsWith(`${dir}\\`);
+  }
+  return resolvedPath === updateDir || resolvedPath.startsWith(`${updateDir}${path.sep}`);
+}
+
+function sanitizeUpdateFileName(fileName, downloadUrl) {
+  const raw = String(fileName || '').trim();
+  const fromUrl = (() => {
+    try {
+      return path.basename(decodeURIComponent(new URL(downloadUrl).pathname || ''));
+    } catch (_) {
+      return '';
+    }
+  })();
+  let name = path.basename(raw || fromUrl || `update-${Date.now()}`);
+  // 去掉路径穿越与非法字符（含 Windows 保留字符）
+  name = name.replace(/[\\/:*?"<>|\x00-\x1f]/g, '_');
+  if (!name || name === '.' || name === '..') {
+    name = `update-${Date.now()}`;
+  }
+  // 无扩展名时按平台给默认后缀
+  if (!path.extname(name)) {
+    if (process.platform === 'darwin') name += '.dmg';
+    else if (process.platform === 'win32') name += '.exe';
+    else name += '.AppImage';
+  }
+  return name;
+}
+
+function clearOldUpdatePackages(dir, keepFileName) {
+  try {
+    const entries = fs.readdirSync(dir);
+    for (const name of entries) {
+      if (keepFileName && name === keepFileName) continue;
+      const full = path.join(dir, name);
+      try {
+        const st = fs.statSync(full);
+        if (st.isFile()) safeUnlinkSync(full);
+      } catch (_) { /* ignore */ }
+    }
+  } catch (error) {
+    console.warn('清理旧更新包失败:', error.message);
+  }
+}
+
 // 下载更新文件
 ipcMain.handle('download-update', async (event, downloadUrl, fileName) => {
   return new Promise((resolve, reject) => {
     try {
-      // 确定下载目录（用户下载目录）
-      const userDataPath = app.getPath('downloads');
-      const filePath = path.join(userDataPath, fileName || `update-${Date.now()}.exe`);
-      
+      const updateDir = getUpdateDownloadDir();
+      const safeName = sanitizeUpdateFileName(fileName, downloadUrl);
+      const filePath = path.join(updateDir, safeName);
+      // 同名旧文件先删；并清掉目录里其他过期安装包，避免占磁盘
+      safeUnlinkSync(filePath);
+      clearOldUpdatePackages(updateDir, safeName);
+
       console.log('开始下载更新文件:', downloadUrl);
       console.log('保存路径:', filePath);
       
@@ -1527,29 +1656,40 @@ ipcMain.handle('download-update', async (event, downloadUrl, fileName) => {
   });
 });
 
-// 安装更新文件
+// 安装更新文件：先退出当前程序，再按平台延迟启动安装包
 ipcMain.handle('install-update', async (event, filePath) => {
   try {
-    console.log('开始安装更新文件:', filePath);
-    
-    // 检查文件是否存在
-    if (!fs.existsSync(filePath)) {
+    console.log('开始安装更新文件:', filePath, 'platform=', process.platform);
+
+    if (!filePath || !fs.existsSync(filePath)) {
       throw new Error('更新文件不存在');
     }
-    
-    // 使用 shell.openPath 打开文件（Windows 会自动运行安装程序）
-    const { shell } = require('electron');
-    await shell.openPath(filePath);
-    
-    console.log('已打开安装程序');
-    
-    // 延迟退出应用，给用户时间看到安装程序启动
+
+    const resolvedPath = path.resolve(filePath);
+    // 仅允许安装本应用 updates 目录内的文件（Mac/Windows 通用）
+    if (!isPathInsideUpdateDir(resolvedPath)) {
+      throw new Error('更新文件路径非法（不在应用 updates 目录内）');
+    }
+
+    isInstallingUpdate = true;
+
+    // 1) 先拉起「延迟启动安装包」的独立进程（本应用退出后它仍存活）
+    launchInstallerAfterAppExit(resolvedPath);
+    console.log('已安排退出后启动安装包');
+
+    // 2) 立刻关闭所有窗口并退出，避免安装时文件被占用
+    closeAllBrowserWindows();
     setTimeout(() => {
-      app.quit();
-    }, 1000);
-    
+      try {
+        app.exit(0);
+      } catch (_) {
+        process.exit(0);
+      }
+    }, 150);
+
     return { success: true };
   } catch (error) {
+    isInstallingUpdate = false;
     console.error('安装更新失败:', error);
     throw error;
   }

@@ -5121,18 +5121,24 @@ video:focus-visible {
   user-select: none;
 }
 
-/* 未开播 / 非 playing 时也显示底部控制栏，保证全屏按钮可见。
+/* 未开播 / 暂停时强制显示底部控制栏，保证全屏按钮可见。
+   播放中（.wtv-is-playing）交给 ArtPlayer：无操作约 3 秒后 opacity 淡出 + 向下 translateY 收起。
    art-bottom 是整层覆盖，必须 pointer-events:none，否则会挡住画面点击续播；
    只让底部 controls / progress 接收点击。 */
-.art-video-player:not(.art-playing) .art-bottom {
+.art-video-player:not(.wtv-is-playing) .art-bottom {
   opacity: 1 !important;
   pointer-events: none !important;
 }
 
-.art-video-player:not(.art-playing) .art-bottom .art-controls,
-.art-video-player:not(.art-playing) .art-bottom .art-progress {
+.art-video-player:not(.wtv-is-playing) .art-bottom .art-controls,
+.art-video-player:not(.wtv-is-playing) .art-bottom .art-progress {
   transform: translateY(0) !important;
   pointer-events: auto !important;
+}
+
+/* 播放中隐藏时，控制栏多下滑一点，全屏观看更干净 */
+.art-video-player.wtv-is-playing {
+  --art-bottom-offset: 64px;
 }
 
 /* 播放控制栏：全屏图标按钮（进入 / 退出两态，靠 .is-fullscreen 切换） */

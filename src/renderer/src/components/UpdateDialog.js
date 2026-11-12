@@ -30,6 +30,7 @@ const UpdateDialog = ({
   const [internalDownloadSpeed, setInternalDownloadSpeed] = React.useState(0);
   const [internalDownloadedFilePath, setInternalDownloadedFilePath] = React.useState(null);
   const [internalErrorMessage, setInternalErrorMessage] = React.useState(null);
+  const [installing, setInstalling] = React.useState(false);
   const downloadSpeedRef = React.useRef(0);
   
   // 使用外部状态或内部状态
@@ -218,19 +219,22 @@ const UpdateDialog = ({
     }
   };
 
-  // 处理安装
+  // 处理安装：主进程会先退出当前程序，再按平台延迟打开安装包
   const handleInstall = async () => {
+    if (installing) return;
     if (!downloadedFilePath || !window.electronAPI || !window.electronAPI.installUpdate) {
       console.error('安装文件路径或安装 API 不可用');
       return;
     }
 
     try {
-      console.log('开始安装更新文件:', downloadedFilePath);
+      setInstalling(true);
+      console.log('开始安装更新文件（将先关闭应用）:', downloadedFilePath);
       await window.electronAPI.installUpdate(downloadedFilePath);
-      // 安装后应用会自动退出，这里不需要额外处理
+      // 主进程会退出；若未退出则保持 installing 状态
     } catch (error) {
       console.error('安装失败:', error);
+      setInstalling(false);
       setInternalErrorMessage(error.message || '安装失败，请重试');
     }
   };
@@ -355,11 +359,11 @@ const UpdateDialog = ({
           {downloadState === 'completed' && (
             <div className="update-download-completed">
               <div className="update-dialog-actions-new">
-                <button className="update-button-secondary" onClick={onClose}>
+                <button className="update-button-secondary" onClick={onClose} disabled={installing}>
                   稍后安装
                 </button>
-                <button className="update-button-primary" onClick={handleInstall}>
-                  立即安装
+                <button className="update-button-primary" onClick={handleInstall} disabled={installing}>
+                  {installing ? '正在关闭并安装...' : '立即安装'}
                 </button>
               </div>
             </div>
@@ -426,8 +430,8 @@ const UpdateDialog = ({
         {/* (D) 按钮区域 - 只在下载完成后显示 */}
         {downloadState === 'completed' && (
         <div className="update-force-actions">
-            <button className="update-button-force-primary" onClick={handleInstall}>
-            立即安装
+            <button className="update-button-force-primary" onClick={handleInstall} disabled={installing}>
+            {installing ? '正在关闭并安装...' : '立即安装'}
           </button>
         </div>
         )}
