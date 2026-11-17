@@ -76,6 +76,15 @@ class CustomHlsJsLoader extends Hls.DefaultConfig.loader {
   }
 }
 
+/** 控制栏纠错图标：与设置/全屏同为 22px art-icon */
+function getFeedbackControlHtml() {
+  return `<i class="art-icon wtv-feedback-btn" aria-hidden="true">
+    <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24">
+      <path fill="currentColor" d="M20 2H4c-1.1 0-1.99.9-1.99 2L2 22l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-7 12h-2v-2h2v2zm0-4h-2V6h2v6z"/>
+    </svg>
+  </i>`;
+}
+
 /** 控制栏全屏图标：同时放入进入/退出两态，用 .is-fullscreen 切换显示 */
 function getFullscreenControlHtml() {
   return `<span class="wtv-css-fs-icons" aria-hidden="true">
@@ -170,6 +179,7 @@ const MyArtPlayer = forwardRef(({
   showNextEpisodeButton = false,
   canNextEpisode = false,
   onNextEpisodeClick,
+  onFeedbackClick,  // 控制栏「纠错」入口
   videoId,          // 用于读取/保存片头片尾配置
   onReady,
   onPlay,
@@ -212,6 +222,7 @@ const MyArtPlayer = forwardRef(({
   const showNextEpisodeButtonRef = useRef(showNextEpisodeButton);
   const canNextEpisodeRef = useRef(canNextEpisode);
   const onNextEpisodeClickRef = useRef(onNextEpisodeClick);
+  const onFeedbackClickRef = useRef(onFeedbackClick);
   const onReadyRef = useRef(onReady);
   const onPlayRef = useRef(onPlay);
   const onPauseRef = useRef(onPause);
@@ -274,6 +285,10 @@ const MyArtPlayer = forwardRef(({
   useEffect(() => {
     onNextEpisodeClickRef.current = onNextEpisodeClick;
   }, [onNextEpisodeClick]);
+
+  useEffect(() => {
+    onFeedbackClickRef.current = onFeedbackClick;
+  }, [onFeedbackClick]);
 
   useEffect(() => {
     onReadyRef.current = onReady;
@@ -1296,6 +1311,25 @@ const MyArtPlayer = forwardRef(({
             onLoadedMetadataRef.current();
           }
         }, 100);
+      }
+
+      // 纠错反馈入口：控制栏底部右侧
+      try {
+        art.controls.add({
+          name: 'wtv-feedback',
+          position: 'right',
+          index: 70,
+          html: getFeedbackControlHtml(),
+          tooltip: '纠错反馈',
+          click: () => {
+            if (onFeedbackClickRef.current) {
+              onFeedbackClickRef.current();
+            }
+            return false;
+          },
+        });
+      } catch (e) {
+        console.error('ArtPlayer 纠错按钮初始化失败:', e);
       }
 
       // 自定义全屏图标按钮：播放中 / 未开始都显示；只走业务层全屏，不触发原生全屏

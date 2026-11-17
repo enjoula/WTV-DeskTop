@@ -5121,6 +5121,30 @@ video:focus-visible {
   user-select: none;
 }
 
+/* 纠错：与设置/全屏同尺寸纯图标，不再用文字胶囊 */
+.art-controls .art-control-wtv-feedback {
+  display: flex !important;
+  align-items: center;
+  justify-content: center;
+}
+
+.wtv-feedback-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  color: #fff;
+  line-height: 0;
+  user-select: none;
+}
+
+.wtv-feedback-btn svg {
+  display: block;
+  width: 22px;
+  height: 22px;
+}
+
 /* 未开播 / 暂停时强制显示底部控制栏，保证全屏按钮可见。
    播放中（.wtv-is-playing）交给 ArtPlayer：无操作约 3 秒后 opacity 淡出 + 向下 translateY 收起。
    art-bottom 是整层覆盖，必须 pointer-events:none，否则会挡住画面点击续播；

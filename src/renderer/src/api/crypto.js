@@ -20,6 +20,7 @@ const AUTH_ENCRYPT_PATHS = [
   '/video/search',
   '/video/episodes',
   '/video/play',
+  '/video/feedback',
   '/user/me',
   '/user/profile',
   '/user/avatar',

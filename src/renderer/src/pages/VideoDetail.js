@@ -3,6 +3,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { useSelector, useDispatch } from 'react-redux';
 import MyArtPlayer from '../components/MyArtPlayer';
+import FeedbackDialog from '../components/FeedbackDialog';
 import Hls from 'hls.js';
 import { 
   fetchEpisodes, 
@@ -106,6 +107,7 @@ const VideoDetail = () => {
   const [episodeOrder, setEpisodeOrder] = useState('asc'); // 正序/倒序：'asc' 正序, 'desc' 倒序
   const [activeEpisodeGroup, setActiveEpisodeGroup] = useState(0); // 当前显示的分段索引
   const [showActorsModal, setShowActorsModal] = useState(false); // 演员弹窗显示状态
+  const [showFeedbackDialog, setShowFeedbackDialog] = useState(false); // 纠错反馈弹窗
   const [isMoviePlaying, setIsMoviePlaying] = useState(false); // 电影是否正在播放
   const [isEpisodePlaying, setIsEpisodePlaying] = useState(false); // 电视剧/动漫/综艺/纪录片是否正在播放
   const [playerReady, setPlayerReady] = useState(false); // 播放器是否准备好
@@ -4074,6 +4076,7 @@ const VideoDetail = () => {
             showNextEpisodeButton={isEpisodeType}
             canNextEpisode={canNextEpisode}
             onNextEpisodeClick={handlePlayNextEpisode}
+            onFeedbackClick={() => setShowFeedbackDialog(true)}
             onNextEpisode={handleEnded}
             onVolumeChange={(newVolume, newMuted) => {
               if (Math.abs(currentVolumeRef.current - newVolume) > 0.01 || currentMutedRef.current !== newMuted) {
@@ -5381,11 +5384,23 @@ const VideoDetail = () => {
     );
   };
 
+  const feedbackVideoType = mapVideoType(videoInfo?.type || currentCategory || '');
+  const feedbackIsMovie = feedbackVideoType === 'movie' || feedbackVideoType === 'movies';
+  const feedbackEpisodeNumber = feedbackIsMovie ? 0 : (Number(selectedEpisode) || 0);
+
   return (
     <div className="video-detail-page">
       {renderVideoHeader()}
       {renderVideoContent()}
       {renderActorsModal()}
+      {showFeedbackDialog ? (
+        <FeedbackDialog
+          videoId={id}
+          episodeNumber={feedbackEpisodeNumber}
+          videoTitle={videoInfo?.title || videoInfo?.name || ''}
+          onClose={() => setShowFeedbackDialog(false)}
+        />
+      ) : null}
     </div>
   );
 };

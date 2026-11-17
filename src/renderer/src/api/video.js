@@ -59,3 +59,13 @@ export const getEpisodes = (videoId) => {
 export const getPlayUrl = (params) => {
   return apiClient.get('/video/play', { params });
 };
+
+// 获取纠错问题类型
+export const getFeedbackTypes = () => {
+  return apiClient.get('/video/feedback/types');
+};
+
+// 提交纠错反馈
+export const submitVideoFeedback = (data) => {
+  return apiClient.post('/video/feedback', data);
+};

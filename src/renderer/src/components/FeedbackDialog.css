@@ -1,0 +1,213 @@
+.feedback-dialog-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 12000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: max(12px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right))
+    max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+  box-sizing: border-box;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+}
+
+.feedback-dialog {
+  width: min(520px, 100%);
+  max-height: min(86vh, 720px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: 12px;
+  background: #1c2430;
+  color: #f3f5f7;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  padding: 16px 16px 14px;
+  box-sizing: border-box;
+}
+
+.feedback-dialog-header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.feedback-dialog-header h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.feedback-dialog-close {
+  border: none;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.75);
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+.feedback-dialog-close:hover {
+  color: #fff;
+}
+
+.feedback-dialog-meta {
+  flex-shrink: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.65);
+}
+
+.feedback-dialog-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.feedback-dialog-episode {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.feedback-dialog-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.feedback-type-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.feedback-type-item {
+  width: 100%;
+  text-align: left;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.92);
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.35;
+  cursor: pointer;
+}
+
+.feedback-type-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.feedback-type-item.is-active {
+  border-color: rgba(64, 158, 255, 0.7);
+  background: rgba(64, 158, 255, 0.18);
+  color: #fff;
+}
+
+.feedback-content-label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.feedback-content-input {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  min-height: 64px;
+  max-height: 140px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.28);
+  color: #fff;
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.5;
+  outline: none;
+}
+
+.feedback-content-input:focus {
+  border-color: rgba(64, 158, 255, 0.7);
+}
+
+.feedback-dialog-actions {
+  flex-shrink: 0;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.feedback-btn-cancel,
+.feedback-btn-submit {
+  min-width: 76px;
+  height: 34px;
+  border-radius: 8px;
+  border: none;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.feedback-btn-cancel {
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.feedback-btn-submit {
+  background: #3a8af5;
+  color: #fff;
+}
+
+.feedback-btn-submit:disabled,
+.feedback-btn-cancel:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* 窄屏：单列类型，避免按钮文字挤压 */
+@media (max-width: 420px) {
+  .feedback-dialog {
+    width: 100%;
+    max-height: 90vh;
+    padding: 14px 12px 12px;
+  }
+
+  .feedback-type-list {
+    grid-template-columns: 1fr;
+  }
+
+  .feedback-content-input {
+    min-height: 56px;
+    max-height: 100px;
+  }
+}
+
+/* 矮屏 / 横屏：压缩正文区，保证操作按钮始终可见 */
+@media (max-height: 560px) {
+  .feedback-dialog {
+    max-height: 94vh;
+    padding: 12px;
+  }
+
+  .feedback-type-item {
+    padding: 8px 10px;
+    font-size: 12px;
+  }
+
+  .feedback-content-input {
+    min-height: 48px;
+    max-height: 72px;
+  }
+}
